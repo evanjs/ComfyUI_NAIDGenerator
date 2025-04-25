@@ -12,7 +12,7 @@ import comfy.utils
 
 import torch
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ExifTags
 
 # cherry-picked from novelai_api.utils
 def argon_hash(email: str, password: str, size: int, domain: str) -> str:
@@ -189,3 +189,40 @@ def prompt_stack_to_nai(l, weight_per_brace=0.05):
 
 def prompt_to_nai(prompt, weight_per_brace=0.05):
     return prompt_stack_to_nai(prompt_to_stack(prompt.replace("\(", "（").replace("\)", "）")), weight_per_brace).replace("（", "(").replace("）",")")
+
+
+def get_metadata(image):
+    if isinstance(image, bytes):
+        # Handle bytes input
+        i = Image.open(io.BytesIO(image))
+    elif isinstance(image, (list, tuple)) and len(image) > 0:
+        img_data = image[0]
+        if hasattr(img_data, 'cpu') and hasattr(img_data, 'numpy'):
+            # Handle tensor input
+            i = Image.fromarray(np.uint8(255 * img_data.cpu().numpy()))
+        elif isinstance(img_data, np.ndarray):
+            # Handle numpy array input
+            i = Image.fromarray(np.uint8(255 * img_data))
+        else:
+            # Assume it's already a PIL image
+            i = img_data
+    else:
+        i = image
+
+    metadata = {}
+    if hasattr(i, '_getexif') and i._getexif() is not None:
+        try:
+            metadata = {ExifTags.TAGS[k]: str(v) for k, v in i._getexif().items()
+                        if k in ExifTags.TAGS and isinstance(v, (str, int, float, bool))}
+        except:
+            pass
+
+    if hasattr(i, 'info'):
+        if "Comment" in i.info:
+            metadata["Comment"] = i.info["Comment"]
+        else:
+            for key, value in i.info.items():
+                if isinstance(value, (str, int, float, bool)):
+                    metadata[key] = value
+
+    return (str(metadata),)

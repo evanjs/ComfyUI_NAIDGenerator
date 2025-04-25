@@ -1,5 +1,7 @@
 import copy
 import io
+import json
+import os
 from pathlib import Path
 import folder_paths
 import zipfile
@@ -276,11 +278,18 @@ class GenerateNAID:
             image_bytes = zipped.read(zipped.infolist()[0]) # only support one n_samples
 
             ## save original png to comfy output dir
-            full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path("NAI_autosave", self.output_dir)
+            ## use basic logic to determine whether we should be saving to `img2img` or `txt2img` directory
+            save_type = "img2img" if action in ("img2img", "infill") else "txt2img"
+            output_type_dir = os.path.join(self.output_dir, save_type)
+            full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
+                "NAI_autosave", output_type_dir)
             file = f"{filename}_{counter:05}_.png"
             d = Path(full_output_folder)
-            d.mkdir(exist_ok=True)
+            d.mkdir(exist_ok=True, parents=True)
             (d / file).write_bytes(image_bytes)
+
+            ## save image metadata to a sidecar file to make it easier to import with services such as Hydrus
+            self.save_metadata_json(action, d, file, image_bytes, model, params)
 
             image = bytes_to_image(image_bytes, keep_alpha)
         except Exception as e:
@@ -290,6 +299,62 @@ class GenerateNAID:
                 raise e
 
         return (image,)
+
+    def save_metadata_json(self, action, d, file, image_bytes, model, params):
+        # Save metadata JSON
+        metadata = get_metadata(image_bytes)
+        metadata_dict = {"metadata": {}}
+        try:
+            # Extract the metadata string from the tuple
+            if isinstance(metadata, tuple) and len(metadata) > 0:
+                metadata_str = metadata[0]
+            else:
+                metadata_str = str(metadata)
+
+            # First, convert the string representation to an actual dictionary
+            if isinstance(metadata_str, str) and "Comment" in metadata_str:
+                # Extract the Comment value - this is the JSON string we want to parse
+                import ast
+                try:
+                    # Convert the string representation of a dict to an actual dict
+                    metadata_dict_raw = ast.literal_eval(metadata_str)
+
+                    if isinstance(metadata_dict_raw, dict) and "Comment" in metadata_dict_raw:
+                        comment_json_str = metadata_dict_raw["Comment"]
+
+                        # Parse the JSON string in the Comment field
+                        try:
+                            comment_json = json.loads(comment_json_str)
+                            # Replace the metadata with the properly parsed JSON
+                            metadata_dict["metadata"] = comment_json
+                        except json.JSONDecodeError:
+                            # If Comment isn't valid JSON, use the whole metadata dict
+                            metadata_dict["metadata"] = metadata_dict_raw
+                    else:
+                        # Use the parsed dict as is
+                        metadata_dict["metadata"] = metadata_dict_raw
+                except (SyntaxError, ValueError):
+                    # If we can't parse the string as a dict, store it raw
+                    metadata_dict["metadata"] = {"raw": metadata_str}
+            else:
+                # Handle case where metadata isn't a string or doesn't contain Comment
+                metadata_dict["metadata"] = {"raw": metadata_str}
+        except Exception as e:
+            print(f"Warning: Could not parse metadata: {e}")
+            if isinstance(metadata, tuple) and len(metadata) > 0:
+                metadata_dict["metadata"] = {"raw": metadata[0]}
+            else:
+                metadata_dict["metadata"] = {"raw": str(metadata)}
+        # Add comfyui_data as before
+        metadata_dict["comfyui_data"] = {
+            "workflow": {
+                "model": model,
+                "action": action,
+                "parameters": params
+            }
+        }
+        metadata_file = f"{file}.json"
+        (d / metadata_file).write_text(json.dumps(metadata_dict, indent=2))
 
 
 def base_augment(access_token, output_dir, limit_opus_free, ignore_errors, req_type, image, options=None):
@@ -465,6 +530,23 @@ class DeclutterAugment:
     CATEGORY = "NovelAI/director_tools"
     def augment(self, image, limit_opus_free, ignore_errors):
         return base_augment(self.access_token, self.output_dir, limit_opus_free, ignore_errors, "declutter", image)
+
+class GetImageMetadata:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "get_metadata"
+    CATEGORY = "NovelAI/utils"
+
+    def get_metadata(self, image):
+        return (get_metadata(image),)
+
 class V4BasePrompt:
     @classmethod
     def INPUT_TYPES(s):
@@ -568,6 +650,7 @@ NODE_CLASS_MAPPINGS = {
     "DeclutterNAID": DeclutterAugment,
     "V4BasePrompt": V4BasePrompt,
     "V4NegativePrompt": V4NegativePrompt,
+    "GetImageMetadata": GetImageMetadata,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -587,4 +670,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DeclutterNAID": "Declutter ✒️🅝🅐🅘",
     "V4BasePrompt": "V4 Base Prompt ✒️🅝🅐🅘",
     "V4NegativePrompt": "V4 Negative Prompt ✒️🅝🅐🅘",
+    "GetImageMetadata": "Get Image Metadata ✒️🅝🅐🅘",
 }
