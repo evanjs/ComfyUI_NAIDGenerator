@@ -191,8 +191,12 @@ class GenerateNAID:
             "qualityToggle": False,
             "sm": (smea == "SMEA" or smea == "SMEA+DYN") and sampler != "ddim",
             "sm_dyn": smea == "SMEA+DYN" and sampler != "ddim",
+            #####
+            # TODO: should these settings be configurable?
+            #   When/where are these setting determined by NAI?
             "deliberate_euler_ancestral_bug": False,
             "prefer_brownian": True,
+            #####
             "dynamic_thresholding": decrisper,
             "skip_cfg_above_sigma": None,
             "controlnet_strength": 1.0,
