@@ -191,6 +191,8 @@ class GenerateNAID:
             "qualityToggle": False,
             "sm": (smea == "SMEA" or smea == "SMEA+DYN") and sampler != "ddim",
             "sm_dyn": smea == "SMEA+DYN" and sampler != "ddim",
+            "deliberate_euler_ancestral_bug": False,
+            "prefer_brownian": True,
             "dynamic_thresholding": decrisper,
             "skip_cfg_above_sigma": None,
             "controlnet_strength": 1.0,
@@ -250,12 +252,16 @@ class GenerateNAID:
             if "model" in option:
                 model = option["model"]
 
+            # NOTE
+            # Updating dictionaries in Python will clobber/overwrite existing values
+            # Instead, recursively merge the dictionaries so that we can compose base and character prompts
+
             # Handle V4 options
             if "v4_prompt" in option:
-                params["v4_prompt"].update(option["v4_prompt"])
+                params["v4_prompt"] = merge_dicts_non_empty(params["v4_prompt"], option["v4_prompt"])
 
             if "v4_negative_prompt" in option:
-                params["v4_negative_prompt"].update(option["v4_negative_prompt"])
+                params["v4_negative_prompt"] = merge_dicts_non_empty(params["v4_negative_prompt"], option["v4_negative_prompt"])
 
         timeout = option["timeout"] if option and "timeout" in option else None
         retry = option["retry"] if option and "retry" in option else None
@@ -577,6 +583,36 @@ class V4PromptConfig:
         option["v4_prompt"]["use_order"] = use_order
         return (option,)
 
+class V4BasePrompt:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "base_caption": ("STRING", { "multiline": True }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)  # Changed from NAID_OPTION to STRING
+    FUNCTION = "convert"        # Changed from set_option to convert
+    CATEGORY = "NovelAI/v4"
+    def convert(self, base_caption):
+        return (base_caption,)  # Simply returns the caption as a string
+
+class V4NegativePrompt:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "negative_caption": ("STRING", { "multiline": True }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "convert"
+    CATEGORY = "NovelAI/v4"
+    def convert(self, negative_caption):
+        return (negative_caption,)
+
 class CharacterNAI:
     @classmethod
     def INPUT_TYPES(s):
@@ -711,6 +747,8 @@ NODE_CLASS_MAPPINGS = {
     "ColorizeNAID": ColorizeAugment,
     "EmotionNAID": EmotionAugment,
     "DeclutterNAID": DeclutterAugment,
+    "V4BasePrompt": V4BasePrompt,
+    "V4NegativePrompt": V4NegativePrompt,
     "V4PromptConfig": V4PromptConfig,
     "CharacterNAI": CharacterNAI,
     "CharacterConcatenateNAI": CharacterConcatenateNAI,
@@ -732,8 +770,50 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ColorizeNAID": "Colorize NAI",
     "EmotionNAID": "Emotion NAI",
     "DeclutterNAID": "Declutter NAI",
+    "V4BasePrompt": "V4 Base Prompt NAI",
+    "V4NegativePrompt": "V4 Negative Prompt NAI",
     "V4PromptConfig": "V4 Prompt Config NAI",
     "CharacterNAI": "Character NAI",
     "CharacterConcatenateNAI": "CharacterConcatenate NAI",
     "GetImageMetadata": "Get Image Metadata NAI",
 }
+
+def merge_dicts_non_empty(dict1, dict2):
+    """Merges two dictionaries recursively, prioritizing non-None and non-empty values."""
+    merged = {}
+
+    # Use a simple union of keys instead of set operations to avoid hashing issues
+    all_keys = list(dict1.keys()) + [k for k in dict2.keys() if k not in dict1]
+
+    for k in all_keys:
+        val1 = dict1.get(k)
+        val2 = dict2.get(k)
+
+        if isinstance(val1, dict) and isinstance(val2, dict):
+            merged[k] = merge_dicts_non_empty(val1, val2)
+        elif isinstance(val1, list) and isinstance(val2, list):
+            # Handle list merging safely without dict.fromkeys()
+            combined_list = []
+            seen = set()
+
+            # Only add items to the result if they're hashable and not already seen
+            for item in val1 + val2:
+                try:
+                    item_hash = hash(item)
+                    if item_hash not in seen:
+                        seen.add(item_hash)
+                        combined_list.append(item)
+                except TypeError:
+                    # If item isn't hashable (like a dict), just add it
+                    combined_list.append(item)
+
+            merged[k] = combined_list
+        elif val1 and val2:
+            merged[k] = val1
+        elif val1:
+            merged[k] = val1
+        elif val2:
+            merged[k] = val2
+        else:
+            pass
+    return merged
