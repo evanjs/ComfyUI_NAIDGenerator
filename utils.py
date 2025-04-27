@@ -226,3 +226,44 @@ def get_metadata(image):
                     metadata[key] = value
 
     return (str(metadata),)
+
+
+def merge_dicts_non_empty(dict1, dict2):
+    """Merges two dictionaries recursively, prioritizing non-None and non-empty values."""
+    merged = {}
+
+    # Use a simple union of keys instead of set operations to avoid hashing issues
+    all_keys = list(dict1.keys()) + [k for k in dict2.keys() if k not in dict1]
+
+    for k in all_keys:
+        val1 = dict1.get(k)
+        val2 = dict2.get(k)
+
+        if isinstance(val1, dict) and isinstance(val2, dict):
+            merged[k] = merge_dicts_non_empty(val1, val2)
+        elif isinstance(val1, list) and isinstance(val2, list):
+            # Handle list merging safely without dict.fromkeys()
+            combined_list = []
+            seen = set()
+
+            # Only add items to the result if they're hashable and not already seen
+            for item in val1 + val2:
+                try:
+                    item_hash = hash(item)
+                    if item_hash not in seen:
+                        seen.add(item_hash)
+                        combined_list.append(item)
+                except TypeError:
+                    # If item isn't hashable (like a dict), just add it
+                    combined_list.append(item)
+
+            merged[k] = combined_list
+        elif val1 and val2:
+            merged[k] = val1
+        elif val1:
+            merged[k] = val1
+        elif val2:
+            merged[k] = val2
+        else:
+            pass
+    return merged
