@@ -278,7 +278,7 @@ class GenerateNAID:
                 params["steps"] = 28
 
         if variety:
-            params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(params["width"], params["height"])
+            params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(params["width"], params["height"], model)
 
         if sampler == "ddim" and model not in ("nai-diffusion-2"):
             params["sampler"] = "ddim_v3"
