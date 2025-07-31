@@ -170,7 +170,7 @@ class GenerateNAID:
             "optional": {"option": ("NAID_OPTION",)},
         }
 
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = ("IMAGE","METADATA",)
     FUNCTION = "generate"
     CATEGORY = "NovelAI"
 
@@ -287,6 +287,7 @@ class GenerateNAID:
             model = f"{model}-inpainting"
 
         image = blank_image()
+        metadata = {}
         try:
             zipped_bytes = generate_image(self.access_token, positive, model, action, params, timeout, retry)
             zipped = zipfile.ZipFile(io.BytesIO(zipped_bytes))
@@ -303,8 +304,11 @@ class GenerateNAID:
             d.mkdir(exist_ok=True, parents=True)
             (d / file).write_bytes(image_bytes)
 
+            # Save metadata JSON
+            metadata = get_metadata(image_bytes)
+
             ## save image metadata to a sidecar file to make it easier to import with services such as Hydrus
-            self.save_metadata_json(action, d, file, image_bytes, model, params)
+            self.save_metadata_json(action, d, file, metadata, model, params)
 
             image = bytes_to_image(image_bytes, keep_alpha)
         except Exception as e:
@@ -313,11 +317,9 @@ class GenerateNAID:
             else:
                 raise e
 
-        return (image,)
+        return (image,metadata,)
 
-    def save_metadata_json(self, action, d, file, image_bytes, model, params):
-        # Save metadata JSON
-        metadata = get_metadata(image_bytes)
+    def save_metadata_json(self, action, d, file, metadata, model, params):
         metadata_dict = {"metadata": {}}
         try:
             # Extract the metadata string from the tuple
