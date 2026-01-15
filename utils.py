@@ -1,3 +1,4 @@
+import json
 from hashlib import blake2b
 import argon2
 
@@ -277,3 +278,57 @@ def merge_dicts_non_empty(dict1, dict2):
         else:
             pass
     return merged
+
+def save_metadata_json(action, d, file, metadata, model, params):
+    metadata_dict = {"metadata": {}}
+    try:
+        # Extract the metadata string from the tuple
+        if isinstance(metadata, tuple) and len(metadata) > 0:
+            metadata_str = metadata[0]
+        else:
+            metadata_str = str(metadata)
+
+        # First, convert the string representation to an actual dictionary
+        if isinstance(metadata_str, str) and "Comment" in metadata_str:
+            # Extract the Comment value - this is the JSON string we want to parse
+            import ast
+            try:
+                # Convert the string representation of a dict to an actual dict
+                metadata_dict_raw = ast.literal_eval(metadata_str)
+
+                if isinstance(metadata_dict_raw, dict) and "Comment" in metadata_dict_raw:
+                    comment_json_str = metadata_dict_raw["Comment"]
+
+                    # Parse the JSON string in the Comment field
+                    try:
+                        comment_json = json.loads(comment_json_str)
+                        # Replace the metadata with the properly parsed JSON
+                        metadata_dict["metadata"] = comment_json
+                    except json.JSONDecodeError:
+                        # If Comment isn't valid JSON, use the whole metadata dict
+                        metadata_dict["metadata"] = metadata_dict_raw
+                else:
+                    # Use the parsed dict as is
+                    metadata_dict["metadata"] = metadata_dict_raw
+            except (SyntaxError, ValueError):
+                # If we can't parse the string as a dict, store it raw
+                metadata_dict["metadata"] = {"raw": metadata_str}
+        else:
+            # Handle case where metadata isn't a string or doesn't contain Comment
+            metadata_dict["metadata"] = {"raw": metadata_str}
+    except Exception as e:
+        print(f"Warning: Could not parse metadata: {e}")
+        if isinstance(metadata, tuple) and len(metadata) > 0:
+            metadata_dict["metadata"] = {"raw": metadata[0]}
+        else:
+            metadata_dict["metadata"] = {"raw": str(metadata)}
+    # Add comfyui_data as before
+    metadata_dict["comfyui_data"] = {
+        "workflow": {
+            "model": model,
+            "action": action,
+            "parameters": params
+        }
+    }
+    metadata_file = f"{file}.json"
+    (d / metadata_file).write_text(json.dumps(metadata_dict, indent=2))

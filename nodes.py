@@ -1,11 +1,14 @@
 import copy
-import json
 import os
 from pathlib import Path
 import folder_paths
 import zipfile
 import json as _json
 import copy as _copy
+
+from .get_image_metadata import GetImageMetadata
+from .character_concatenate_nai import CharacterConcatenateNAI
+from .character_nai import CharacterNAI
 
 from .utils import *
 import requests
@@ -448,7 +451,7 @@ class GenerateNAID:
             metadata = get_metadata(image_bytes)
 
             ## save image metadata to a sidecar file to make it easier to import with services such as Hydrus
-            self.save_metadata_json(action, d, file, metadata, model, params)
+            save_metadata_json(action, d, file, metadata, model, params)
 
             image = bytes_to_image(image_bytes, keep_alpha)
         except Exception as e:
@@ -456,60 +459,6 @@ class GenerateNAID:
             else: raise e
 
         return (image,metadata,)
-
-    def save_metadata_json(self, action, d, file, metadata, model, params):
-        metadata_dict = {"metadata": {}}
-        try:
-            # Extract the metadata string from the tuple
-            if isinstance(metadata, tuple) and len(metadata) > 0:
-                metadata_str = metadata[0]
-            else:
-                metadata_str = str(metadata)
-
-            # First, convert the string representation to an actual dictionary
-            if isinstance(metadata_str, str) and "Comment" in metadata_str:
-                # Extract the Comment value - this is the JSON string we want to parse
-                import ast
-                try:
-                    # Convert the string representation of a dict to an actual dict
-                    metadata_dict_raw = ast.literal_eval(metadata_str)
-
-                    if isinstance(metadata_dict_raw, dict) and "Comment" in metadata_dict_raw:
-                        comment_json_str = metadata_dict_raw["Comment"]
-
-                        # Parse the JSON string in the Comment field
-                        try:
-                            comment_json = json.loads(comment_json_str)
-                            # Replace the metadata with the properly parsed JSON
-                            metadata_dict["metadata"] = comment_json
-                        except json.JSONDecodeError:
-                            # If Comment isn't valid JSON, use the whole metadata dict
-                            metadata_dict["metadata"] = metadata_dict_raw
-                    else:
-                        # Use the parsed dict as is
-                        metadata_dict["metadata"] = metadata_dict_raw
-                except (SyntaxError, ValueError):
-                    # If we can't parse the string as a dict, store it raw
-                    metadata_dict["metadata"] = {"raw": metadata_str}
-            else:
-                # Handle case where metadata isn't a string or doesn't contain Comment
-                metadata_dict["metadata"] = {"raw": metadata_str}
-        except Exception as e:
-            print(f"Warning: Could not parse metadata: {e}")
-            if isinstance(metadata, tuple) and len(metadata) > 0:
-                metadata_dict["metadata"] = {"raw": metadata[0]}
-            else:
-                metadata_dict["metadata"] = {"raw": str(metadata)}
-        # Add comfyui_data as before
-        metadata_dict["comfyui_data"] = {
-            "workflow": {
-                "model": model,
-                "action": action,
-                "parameters": params
-            }
-        }
-        metadata_file = f"{file}.json"
-        (d / metadata_file).write_text(json.dumps(metadata_dict, indent=2))
 
 # -------------------------------------------------
 # Director Tool Augment Nodes
@@ -693,74 +642,6 @@ class V4NegativePrompt:
     def convert(self, negative_caption):
         return (negative_caption,)
 
-class GetImageMetadata:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-            }
-        }
-
-    RETURN_TYPES = ("STRING",)
-    FUNCTION = "get_metadata"
-    CATEGORY = "NovelAI/utils"
-
-    def get_metadata(self, image):
-        return (get_metadata(image),)
-
-class CharacterNAI:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "positive_prompt": ("STRING", {"multiline": True}),
-                "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
-                "x": (["A", "B", "C", "D", "E"], {"default": "C"}),
-                "y": (["1", "2", "3", "4", "5"], {"default": "3"}),
-            }
-        }
-
-    RETURN_TYPES = ("CHARACTER_NAI",)
-    FUNCTION = "create"
-    CATEGORY = "NovelAI/v4"
-
-    def create(self, positive_prompt, x, y, negative_prompt):
-        # Convert x ('A'-'E') and y (1-5) to normalized float (0.0~1.0)
-        x_map = {'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4}
-        x_norm = x_map.get(x, 2) / 4.0
-        y_norm = (int(y) - 1) / 4.0
-        return ({
-                    "char_caption": positive_prompt,
-                    "centers": [{"x": x_norm, "y": y_norm}],
-                    "negative_caption": negative_prompt,
-                },)
-
-class CharacterConcatenateNAI:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "character1": ("CHARACTER_NAI", {"forceInput": True}),
-            },
-            "optional": {
-                "character2": ("CHARACTER_NAI", {"forceInput": False}),
-                "character3": ("CHARACTER_NAI", {"forceInput": False}),
-                "character4": ("CHARACTER_NAI", {"forceInput": False}),
-                "character5": ("CHARACTER_NAI", {"forceInput": False}),
-                "character6": ("CHARACTER_NAI", {"forceInput": False}),
-            }
-        }
-
-    RETURN_TYPES = ("CHARACTER_LIST_NAI",)
-    FUNCTION = "concat"
-    CATEGORY = "NovelAI/v4"
-
-    def concat(self, character1, character2=None, character3=None, character4=None, character5=None, character6=None):
-        # Convert inputs to list and exclude "None"
-        characters = [character1, character2, character3, character4, character5, character6]
-        characters = [c for c in characters if c is not None]
-        return (characters,)
 
 # GenerateNAID node extension: character prompt slots added
 # Add 'characters' to INPUT_TYPES of existing GenerateNAID and internally assemble char_captions in a metadata.yaml structure.
@@ -825,6 +706,8 @@ def new_generate_naid_generate(self, *args, **kwargs):
     if 'characters' in kwargs:
         del kwargs['characters']
     return old_generate_naid_generate(self, *args[:len(params)-1], **kwargs)
+
+GenerateNAID.generate = new_generate_naid_generate
 
 # -------------------------------------------------
 # Registration
