@@ -141,12 +141,18 @@ def calculate_resolution(pixel_count, aspect_ratio):
     height = int(np.floor(k * h / w) * 64)
     return width, height
 
+
+# Constants for skip CFG calculation
+REFERENCE_RESOLUTION = 1011712  # 832 * 1216
+NAI_V4_5_SIGMA_MULTIPLIER = 58
+DEFAULT_SIGMA_MULTIPLIER = 19
+
+
 def calculate_skip_cfg_above_sigma(w, h, model):
     if model == "nai-diffusion-4-5-full":
-        return 58
-    
-    # 832 * 1216
-    return (w * h / 1011712) ** 0.5 * 19
+        return (w * h / REFERENCE_RESOLUTION) ** 0.5 * NAI_V4_5_SIGMA_MULTIPLIER
+
+    return (w * h / REFERENCE_RESOLUTION) ** 0.5 * DEFAULT_SIGMA_MULTIPLIER
 
 
 def prompt_to_stack(sentence):
