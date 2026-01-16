@@ -432,7 +432,9 @@ class GenerateNAID:
             ## save original png to comfy output dir
             ## use basic logic to determine whether we should be saving to `img2img` or `txt2img` directory
             save_type = "img2img" if action in ("img2img", "infill") else "txt2img"
-            full_output_folder, filename, counter, _, _ = folder_paths.get_save_image_path("NAI_autosave", self.output_dir)
+            output_type_dir = os.path.join(self.output_dir, save_type)
+            full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
+                "NAI_autosave", output_type_dir)
             file = f"{filename}_{counter:05}_.png"
             d = Path(full_output_folder)
             d.mkdir(exist_ok=True, parents=True)
