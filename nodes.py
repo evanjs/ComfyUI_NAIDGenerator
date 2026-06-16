@@ -216,20 +216,37 @@ class NetworkOption:
                 "ignore_errors": ("BOOLEAN", { "default": True }),
                 "timeout_sec": ("INT", { "default": 120, "min": 30, "max": 3000, "step": 1, "display": "number" }),
                 "retry": ("INT", { "default": 3, "min": 1, "max": 100, "step": 1, "display": "number" }),
-                "autosave_format": (["png", "webp"], { "default": "png" }),
-                "webp_quality": ("INT", { "default": 85, "min": 1, "max": 100, "step": 1, "display": "number" }),
             },
             "optional": { "option": ("NAID_OPTION",) },
         }
     RETURN_TYPES = ("NAID_OPTION",)
     FUNCTION = "set_option"
     CATEGORY = "NovelAI"
-    def set_option(self, ignore_errors, timeout_sec, retry, autosave_format, webp_quality, option=None):
+    def set_option(self, ignore_errors, timeout_sec, retry, option=None):
         option = copy.deepcopy(option) if option else {}
         option["ignore_errors"] = ignore_errors
         option["timeout_sec"] = timeout_sec
-        option["timeout"] = timeout_sec
         option["retry"] = retry
+        return (option,)
+
+
+class AutosaveOption:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "autosave_format": (["png", "webp"], { "default": "png" }),
+                "webp_quality": ("INT", { "default": 85, "min": 1, "max": 100, "step": 1, "display": "number" }),
+            },
+            "optional": { "option": ("NAID_OPTION",) },
+        }
+
+    RETURN_TYPES = ("NAID_OPTION",)
+    FUNCTION = "set_option"
+    CATEGORY = "NovelAI"
+
+    def set_option(self, autosave_format, webp_quality, option=None):
+        option = copy.deepcopy(option) if option else {}
         option["autosave_format"] = autosave_format
         option["webp_quality"] = webp_quality
         return (option,)
@@ -732,6 +749,7 @@ NODE_CLASS_MAPPINGS = {
     "InpaintingOptionNAID": InpaintingOption,
     "VibeTransferOptionNAID": VibeTransferOption,
     "NetworkOptionNAID": NetworkOption,
+    "AutosaveOptionNAID": AutosaveOption,
     "CharacterReferenceOptionNAID": CharacterReferenceOption,
     "AnlasTrackerNAID": AnlasTrackerNAID, # New node
     "MaskImageToNAID": ImageToNAIMask,
@@ -754,6 +772,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "InpaintingOptionNAID": "InpaintingOption ✒️🅝🅐🅘",
     "VibeTransferOptionNAID": "VibeTransferOption ✒️🅝🅐🅘",
     "NetworkOptionNAID": "NetworkOption ✒️🅝🅐🅘",
+    "AutosaveOptionNAID": "AutosaveOption ✒️🅝🅐🅘",
     "CharacterReferenceOptionNAID": "Character Reference ✒️🅝🅐🅘",
     "AnlasTrackerNAID": "Anlas Tracker ✒️🅝🅐🅘", # New node
     "MaskImageToNAID": "Convert Mask Image ✒️🅝🅐🅘",
