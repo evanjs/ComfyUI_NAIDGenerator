@@ -216,17 +216,22 @@ class NetworkOption:
                 "ignore_errors": ("BOOLEAN", { "default": True }),
                 "timeout_sec": ("INT", { "default": 120, "min": 30, "max": 3000, "step": 1, "display": "number" }),
                 "retry": ("INT", { "default": 3, "min": 1, "max": 100, "step": 1, "display": "number" }),
+                "autosave_format": (["png", "webp"], { "default": "png" }),
+                "webp_quality": ("INT", { "default": 85, "min": 1, "max": 100, "step": 1, "display": "number" }),
             },
             "optional": { "option": ("NAID_OPTION",) },
         }
     RETURN_TYPES = ("NAID_OPTION",)
     FUNCTION = "set_option"
     CATEGORY = "NovelAI"
-    def set_option(self, ignore_errors, timeout_sec, retry, option=None):
+    def set_option(self, ignore_errors, timeout_sec, retry, autosave_format, webp_quality, option=None):
         option = copy.deepcopy(option) if option else {}
         option["ignore_errors"] = ignore_errors
         option["timeout_sec"] = timeout_sec
+        option["timeout"] = timeout_sec
         option["retry"] = retry
+        option["autosave_format"] = autosave_format
+        option["webp_quality"] = webp_quality
         return (option,)
 
 # -------------------------------------------------
@@ -435,11 +440,16 @@ class GenerateNAID:
             output_type_dir = os.path.join(self.output_dir, save_type)
             full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
                 "NAI_autosave", output_type_dir)
-            file = f"{filename}_{counter:05}_.png"
+
+            autosave_format = option.get("autosave_format", "png") if option else "png"
+            webp_quality = option.get("webp_quality", 85) if option else 85
+            file_ext = "webp" if autosave_format == "webp" else "png"
+
+            file = f"{filename}_{counter:05}_.{file_ext}"
             d = Path(full_output_folder)
             d.mkdir(exist_ok=True, parents=True)
-            (d / file).write_bytes(image_bytes)
-            
+            save_image_with_metadata(image_bytes, d / file, autosave_format, webp_quality)
+
             if start_anlas is not None:
                 try:
                     user_data_final = _get_user_data(self.access_token, timeout, retry)
