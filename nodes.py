@@ -23,6 +23,22 @@ from PIL import Image as PILImage
 
 TOOLTIP_LIMIT_OPUS_FREE = "Limit image size and steps for free generation by Opus."
 
+def _training_steps_total(value):
+    if isinstance(value, dict):
+        return sum(
+            amount
+            for amount in (
+                value.get("fixedTrainingStepsLeft"),
+                value.get("purchasedTrainingSteps"),
+            )
+            if isinstance(amount, (int, float))
+        )
+
+    if isinstance(value, (int, float)):
+        return value
+
+    return None
+
 @contextmanager
 def _naid_profile_step(enabled: bool, label: str):
     if not enabled:
@@ -230,18 +246,25 @@ class NetworkOption:
             "required": {
                 "ignore_errors": ("BOOLEAN", { "default": True }),
                 "timeout_sec": ("INT", { "default": 120, "min": 30, "max": 3000, "step": 1, "display": "number" }),
-                "retry": ("INT", { "default": 3, "min": 1, "max": 100, "step": 1, "display": "number" }),
+                "retry": ("INT", { "default": 3, "min": 1, "max": 100, "step": 1 }),
+                "autosave_format": (["png", "webp"], { "default": "png" }),
+                "webp_quality": ("INT", { "default": 85, "min": 1, "max": 100, "step": 1 }),
+                "track_anlas": ("BOOLEAN", { "default": False }),
             },
             "optional": { "option": ("NAID_OPTION",) },
         }
     RETURN_TYPES = ("NAID_OPTION",)
     FUNCTION = "set_option"
     CATEGORY = "NovelAI"
-    def set_option(self, ignore_errors, timeout_sec, retry, option=None):
+    def set_option(self, ignore_errors, timeout_sec, retry, autosave_format, webp_quality, track_anlas, option=None):
         option = copy.deepcopy(option) if option else {}
         option["ignore_errors"] = ignore_errors
         option["timeout_sec"] = timeout_sec
+        option["timeout"] = timeout_sec
         option["retry"] = retry
+        option["autosave_format"] = autosave_format
+        option["webp_quality"] = webp_quality
+        option["track_anlas"] = track_anlas
         return (option,)
 
 
@@ -454,6 +477,7 @@ class GenerateNAID:
         with _naid_profile_step(profile_enabled, "final param adjustments"):
             timeout = option.get("timeout", 120) if option else 120
             retry = option.get("retry", 3) if option else 3
+            track_anlas = option.get("track_anlas", False) if option else False
 
             if limit_opus_free:
                 pixel_limit = 1024 * 1024
@@ -466,12 +490,13 @@ class GenerateNAID:
             if action == "infill" and "nai-diffusion-2" not in model: model = f"{model}-inpainting"
 
         start_anlas = None
-        try:
-            with _naid_profile_step(profile_enabled, "pre-gen anlas /user/data"):
-                user_data = _get_user_data(self.access_token, timeout, retry)
-                start_anlas = user_data.get("subscription", {}).get("trainingStepsLeft")
-                if start_anlas is not None: print(f"[NovelAI] Anlas (pre-gen): {start_anlas}")
-        except Exception as e: print(f"[NovelAI] Anlas tracking failed (pre-gen): {e}")
+        if track_anlas:
+                try:
+                    user_data = _get_user_data(self.access_token, timeout, retry)
+                    training_steps_left = user_data.get("subscription", {}).get("trainingStepsLeft")
+                    start_anlas = _training_steps_total(training_steps_left)
+                    if start_anlas is not None: print(f"[NovelAI] Anlas (pre-gen): {start_anlas}")
+                except Exception as e: print(f"[NovelAI] Anlas tracking failed (pre-gen): {e}")
 
         image = blank_image()
         metadata = {}
@@ -502,15 +527,15 @@ class GenerateNAID:
             with _naid_profile_step(profile_enabled, f"save image with metadata ({autosave_format}, quality={webp_quality})"):
                 save_image_with_metadata(image_bytes, d / file, autosave_format, webp_quality)
 
-            if start_anlas is not None:
-                try:
-                    with _naid_profile_step(profile_enabled, "post-gen anlas /user/data"):
+            if track_anlas and start_anlas is not None:
+                    try:
                         user_data_final = _get_user_data(self.access_token, timeout, retry)
-                        final_anlas = user_data_final.get("subscription", {}).get("trainingStepsLeft")
+                        training_steps_left_final = user_data_final.get("subscription", {}).get("trainingStepsLeft")
+                        final_anlas = _training_steps_total(training_steps_left_final)
                         if final_anlas is not None:
                             print(f"[NovelAI] Generation cost: {start_anlas - final_anlas} Anlas")
                             print(f"[NovelAI] Anlas (post-gen): {final_anlas}")
-                except Exception as e: print(f"[NovelAI] Anlas tracking failed (post-gen): {e}")
+                    except Exception as e: print(f"[NovelAI] Anlas tracking failed (post-gen): {e}")
 
             # Save metadata JSON
             with _naid_profile_step(profile_enabled, "extract metadata"):
@@ -665,7 +690,7 @@ class DeclutterAugment:
 class AnlasTrackerNAID:
     def __init__(self):
         self.access_token = get_access_token()
-    
+
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -677,17 +702,22 @@ class AnlasTrackerNAID:
     RETURN_NAMES = ("anlas_int", "anlas_string",)
     FUNCTION = "get_anlas"
     CATEGORY = "NovelAI/utils"
-    
+
     def get_anlas(self, trigger=None):
         anlas_count = 0
         try:
             user_data = _get_user_data(self.access_token)
-            anlas_count = user_data.get("subscription", {}).get("trainingStepsLeft", 0)
+            training_steps_left = user_data.get("subscription", {}).get("trainingStepsLeft", 0)
+            parsed_anlas_count = _training_steps_total(training_steps_left)
+
+            if parsed_anlas_count is not None:
+                anlas_count = int(parsed_anlas_count)
+
             print(f"[NovelAI] Current Anlas Balance: {anlas_count}")
         except Exception as e:
             print(f"[NovelAI] Failed to fetch Anlas balance: {e}")
             return (0, "Error fetching Anlas")
-            
+        
         return (anlas_count, f"{anlas_count} Anlas")
 
 # -------------------------------------------------
