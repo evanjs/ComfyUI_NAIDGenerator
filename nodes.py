@@ -229,6 +229,28 @@ class NetworkOption:
         option["retry"] = retry
         return (option,)
 
+
+class AutosaveOption:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "autosave_format": (["png", "webp"], { "default": "png" }),
+                "webp_quality": ("INT", { "default": 85, "min": 1, "max": 100, "step": 1, "display": "number" }),
+            },
+            "optional": { "option": ("NAID_OPTION",) },
+        }
+
+    RETURN_TYPES = ("NAID_OPTION",)
+    FUNCTION = "set_option"
+    CATEGORY = "NovelAI"
+
+    def set_option(self, autosave_format, webp_quality, option=None):
+        option = copy.deepcopy(option) if option else {}
+        option["autosave_format"] = autosave_format
+        option["webp_quality"] = webp_quality
+        return (option,)
+
 # -------------------------------------------------
 # Character Reference (Single Image)
 # -------------------------------------------------
@@ -435,11 +457,16 @@ class GenerateNAID:
             output_type_dir = os.path.join(self.output_dir, save_type)
             full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
                 "NAI_autosave", output_type_dir)
-            file = f"{filename}_{counter:05}_.png"
+
+            autosave_format = option.get("autosave_format", "png") if option else "png"
+            webp_quality = option.get("webp_quality", 85) if option else 85
+            file_ext = "webp" if autosave_format == "webp" else "png"
+
+            file = f"{filename}_{counter:05}_.{file_ext}"
             d = Path(full_output_folder)
             d.mkdir(exist_ok=True, parents=True)
-            (d / file).write_bytes(image_bytes)
-            
+            save_image_with_metadata(image_bytes, d / file, autosave_format, webp_quality)
+
             if start_anlas is not None:
                 try:
                     user_data_final = _get_user_data(self.access_token, timeout, retry)
@@ -722,6 +749,7 @@ NODE_CLASS_MAPPINGS = {
     "InpaintingOptionNAID": InpaintingOption,
     "VibeTransferOptionNAID": VibeTransferOption,
     "NetworkOptionNAID": NetworkOption,
+    "AutosaveOptionNAID": AutosaveOption,
     "CharacterReferenceOptionNAID": CharacterReferenceOption,
     "AnlasTrackerNAID": AnlasTrackerNAID, # New node
     "MaskImageToNAID": ImageToNAIMask,
@@ -744,6 +772,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "InpaintingOptionNAID": "InpaintingOption ✒️🅝🅐🅘",
     "VibeTransferOptionNAID": "VibeTransferOption ✒️🅝🅐🅘",
     "NetworkOptionNAID": "NetworkOption ✒️🅝🅐🅘",
+    "AutosaveOptionNAID": "AutosaveOption ✒️🅝🅐🅘",
     "CharacterReferenceOptionNAID": "Character Reference ✒️🅝🅐🅘",
     "AnlasTrackerNAID": "Anlas Tracker ✒️🅝🅐🅘", # New node
     "MaskImageToNAID": "Convert Mask Image ✒️🅝🅐🅘",

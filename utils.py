@@ -1,6 +1,7 @@
 import json
 from hashlib import blake2b
 import argon2
+from xml.sax.saxutils import escape, unescape
 
 import base64
 import dotenv
@@ -237,12 +238,71 @@ def get_metadata(image):
     if hasattr(i, 'info'):
         if "Comment" in i.info:
             metadata["Comment"] = i.info["Comment"]
+        elif "xmp" in i.info:
+            xmp = i.info["xmp"]
+            if isinstance(xmp, bytes):
+                xmp = xmp.decode("utf-8", errors="replace")
+
+            match = re.search(r"<nai:Comment>(.*?)</nai:Comment>", xmp, re.DOTALL)
+            if match:
+                metadata["Comment"] = unescape(match.group(1))
+            else:
+                metadata["xmp"] = xmp
         else:
             for key, value in i.info.items():
                 if isinstance(value, (str, int, float, bool)):
                     metadata[key] = value
 
     return (str(metadata),)
+
+
+def get_nai_comment(image_bytes):
+    image = Image.open(io.BytesIO(image_bytes))
+    return image.info.get("Comment")
+
+
+def build_nai_xmp(comment):
+    if not comment:
+        return None
+
+    escaped_comment = escape(str(comment))
+    return f"""<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="" xmlns:nai="https://novelai.net/ns/1.0/">
+      <nai:Comment>{escaped_comment}</nai:Comment>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>""".encode("utf-8")
+
+
+def save_image_with_metadata(image_bytes, output_path, output_format="png", webp_quality=85):
+    output_format = (output_format or "png").lower()
+
+    if output_format == "png":
+        output_path.write_bytes(image_bytes)
+        return
+
+    image = Image.open(io.BytesIO(image_bytes))
+    xmp = build_nai_xmp(get_nai_comment(image_bytes))
+
+    save_kwargs = {
+        "format": "WEBP",
+        "quality": int(webp_quality),
+        "method": 6,
+    }
+
+    if xmp:
+        save_kwargs["xmp"] = xmp
+
+    if "exif" in image.info:
+        save_kwargs["exif"] = image.info["exif"]
+
+    if "icc_profile" in image.info:
+        save_kwargs["icc_profile"] = image.info["icc_profile"]
+
+    image.save(output_path, **save_kwargs)
 
 
 def merge_dicts_non_empty(dict1, dict2):
