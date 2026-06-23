@@ -361,6 +361,7 @@ class GenerateNAID:
 
     @staticmethod
     def _post_image(access_token, prompt, model, action, parameters, timeout=None, retry=None):
+        profile_enabled = parameters.get("_profile_http", True) if isinstance(parameters, dict) else True
         data = {"input": prompt, "model": model, "action": action, "parameters": parameters}
 
         req_mod = requests
@@ -370,23 +371,47 @@ class GenerateNAID:
             session.mount("https://", HTTPAdapter(max_retries=retries))
             req_mod = session
 
-        response = req_mod.post(f"{BASE_URL}/ai/generate-image", json=data, headers={"Authorization": f"Bearer {access_token}"}, timeout=timeout)
+        request_start = time.perf_counter()
+        response = req_mod.post(
+            f"{BASE_URL}/ai/generate-image",
+            json=data,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=timeout,
+            stream=True,
+        )
+        headers_elapsed = time.perf_counter() - request_start
 
-        if response.status_code >= 400:
-            print("RAW ERROR STATUS:", response.status_code)
-            print("RAW ERROR BODY:", response.text)
+        content_start = time.perf_counter()
+        response_content = response.content
+        content_elapsed = time.perf_counter() - content_start
+        total_elapsed = time.perf_counter() - request_start
+
+        if profile_enabled:
+            print(f"[NovelAI][profile] HTTP POST until response headers: {headers_elapsed:.3f}s")
+            print(f"[NovelAI][profile] HTTP response body download: {content_elapsed:.3f}s")
+            print(f"[NovelAI][profile] HTTP response bytes: {len(response_content)}")
+            print(f"[NovelAI][profile] HTTP POST total inside _post_image: {total_elapsed:.3f}s")
+
             try:
                 dbg = _copy.deepcopy(data)
                 p = dbg.get("parameters", {})
-                if "director_reference_images" in p: p["director_reference_images"] = [i[:60] + "...(trunc)" for i in p["director_reference_images"]]
-                if "reference_image_multiple" in p: p["reference_image_multiple"] = [i[:60] + "...(trunc)" for i in p["reference_image_multiple"]]
-                dbg["parameters"] = p
-                print("OUTGOING PAYLOAD (sanitized):", _json.dumps(dbg)[:2000])
+                for key in ("image", "mask"):
+                    if key in p:
+                        p[key] = p[key][:60] + "...(trunc)"
+                if "director_reference_images" in p:
+                    p["director_reference_images"] = [i[:60] + "...(trunc)" for i in p["director_reference_images"]]
+                if "reference_image_multiple" in p:
+                    p["reference_image_multiple"] = [i[:60] + "...(trunc)" for i in p["reference_image_multiple"]]
+                print("[NovelAI][profile] OUTGOING PAYLOAD:", _json.dumps(dbg, ensure_ascii=False)[:5000])
             except Exception as e:
                 print("Payload debug failed:", e)
 
+        if response.status_code >= 400:
+            print("RAW ERROR STATUS:", response.status_code)
+            print("RAW ERROR BODY:", response_content.decode("utf-8", errors="replace"))
+
         response.raise_for_status()
-        return response.content
+        return response_content
 
     def generate(self, limit_opus_free, width, height, positive, negative,
                  steps, cfg, decrisper, variety, smea, sampler, scheduler,
