@@ -1,10 +1,14 @@
 import copy
-import io
+import os
 from pathlib import Path
 import folder_paths
 import zipfile
 import json as _json
 import copy as _copy
+
+from .get_image_metadata import GetImageMetadata
+from .character_concatenate_nai import CharacterConcatenateNAI
+from .character_nai import CharacterNAI
 
 from .utils import *
 import requests
@@ -13,6 +17,7 @@ from urllib3.util.retry import Retry
 import torch
 import numpy as np
 from PIL import Image as PILImage
+
 
 TOOLTIP_LIMIT_OPUS_FREE = "Limit image size and steps for free generation by Opus."
 
@@ -220,7 +225,7 @@ class NetworkOption:
     def set_option(self, ignore_errors, timeout_sec, retry, option=None):
         option = copy.deepcopy(option) if option else {}
         option["ignore_errors"] = ignore_errors
-        option["timeout"] = timeout_sec
+        option["timeout_sec"] = timeout_sec
         option["retry"] = retry
         return (option,)
 
@@ -267,27 +272,30 @@ class GenerateNAID:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }),
-                "width": ("INT", { "default": 832, "min": 64, "max": 1600, "step": 64, "display": "number" }),
-                "height": ("INT", { "default": 1216, "min": 64, "max": 1600, "step": 64, "display": "number" }),
-                "positive": ("STRING", { "default": ", best quality, amazing quality, very aesthetic, absurdres", "multiline": True, "dynamicPrompts": False }),
-                "negative": ("STRING", { "default": "lowres", "multiline": True, "dynamicPrompts": False }),
-                "steps": ("INT", { "default": 28, "min": 0, "max": 50, "step": 1, "display": "number" }),
-                "cfg": ("FLOAT", { "default": 5.0, "min": 0.0, "max": 10.0, "step": 0.1, "display": "number" }),
-                "variety" : ("BOOLEAN", { "default": False }),
-                "decrisper": ("BOOLEAN", { "default": False }),
-                "smea": (["none", "SMEA", "SMEA+DYN"], { "default": "none" }),
-                "sampler": (["k_euler", "k_euler_ancestral", "k_dpmpp_2s_ancestral", "k_dpmpp_2m_sde", "k_dpmpp_2m", "k_dpmpp_sde", "ddim"], { "default": "k_euler" }),
-                "scheduler": (["native", "karras", "exponential", "polyexponential"], { "default": "native" }),
-                "seed": ("INT", { "default": 0, "min": 0, "max": 9999999999, "step": 1, "display": "number" }),
-                "uncond_scale": ("FLOAT", { "default": 1.0, "min": 0.0, "max": 1.5, "step": 0.05, "display": "number" }),
-                "cfg_rescale": ("FLOAT", { "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.02, "display": "number" }),
-                "keep_alpha": ("BOOLEAN", { "default": True, "tooltip": "Disable to further process output images locally" }),
+                "limit_opus_free": ("BOOLEAN", {"default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE}),
+                "width": ("INT", {"default": 832, "min": 64, "max": 1600, "step": 64, "display": "number"}),
+                "height": ("INT", {"default": 1216, "min": 64, "max": 1600, "step": 64, "display": "number"}),
+                "positive": ("STRING", {"default": ", best quality, amazing quality, very aesthetic, absurdres", "multiline": True, "dynamicPrompts": False}),
+                "negative": ("STRING", {"default": "lowres", "multiline": True, "dynamicPrompts": False}),
+                "use_coords": ("BOOLEAN", {"default": True, "label": "Manual_positioning", "tooltip": "Manually specify character positions"}),
+                "use_order": ("BOOLEAN", {"default": True, "label": "Keep_order", "tooltip": "Preserve character order"}),
+                "legacy_uc": ("BOOLEAN", {"default": False, "label": "Legacy_UC", "tooltip": "Use legacy UC logic"}),
+                "steps": ("INT", {"default": 28, "min": 0, "max": 50, "step": 1, "display": "number"}),
+                "cfg": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 10.0, "step": 0.1, "display": "number"}),
+                "variety": ("BOOLEAN", {"default": False}),
+                "decrisper": ("BOOLEAN", {"default": False}),
+                "smea": (["none", "SMEA", "SMEA+DYN"], {"default": "none"}),
+                "sampler": (["k_euler", "k_euler_ancestral", "k_dpmpp_2s_ancestral", "k_dpmpp_2m_sde", "k_dpmpp_2m", "k_dpmpp_sde", "ddim"], {"default": "k_euler"}),
+                "scheduler": (["native", "karras", "exponential", "polyexponential"], {"default": "native"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 9999999999, "step": 1, "display": "number"}),
+                "uncond_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.5, "step": 0.05, "display": "number"}),
+                "cfg_rescale": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.02, "display": "number"}),
+                "keep_alpha": ("BOOLEAN", {"default": True, "tooltip": "Disable to further process output images locally"}),
             },
-            "optional": { "option": ("NAID_OPTION",) },
+            "optional": {"option": ("NAID_OPTION",)},
         }
 
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = ("IMAGE","METADATA",)
     FUNCTION = "generate"
     CATEGORY = "NovelAI"
 
@@ -322,8 +330,7 @@ class GenerateNAID:
 
     def generate(self, limit_opus_free, width, height, positive, negative,
                  steps, cfg, decrisper, variety, smea, sampler, scheduler,
-                 seed, uncond_scale, cfg_rescale, keep_alpha, option=None):
-
+                 seed, uncond_scale, cfg_rescale, keep_alpha, use_coords, use_order, legacy_uc, option=None):
         width, height = calculate_resolution(width * height, (width, height))
 
         params = {
@@ -331,12 +338,13 @@ class GenerateNAID:
             "seed": seed, "n_samples": 1, "ucPreset": 3, "qualityToggle": False,
             "sm": (smea == "SMEA" or smea == "SMEA+DYN") and sampler != "ddim",
             "sm_dyn": (smea == "SMEA+DYN") and sampler != "ddim",
-            "dynamic_thresholding": decrisper, "controlnet_strength": 1.0, "legacy": False, "add_original_image": False,
+            "dynamic_thresholding": decrisper, "controlnet_strength": 1.0, "add_original_image": False,
             "cfg_rescale": cfg_rescale, "noise_schedule": scheduler, "legacy_v3_extend": False,
             "uncond_scale": uncond_scale, "negative_prompt": negative, "prompt": positive,
             "reference_image_multiple": [], "reference_information_extracted_multiple": [], "reference_strength_multiple": [],
             "extra_noise_seed": seed,
-            "v4_prompt": {"use_coords": False, "use_order": False, "caption": {"base_caption": positive, "char_captions": []}},
+            "v4_prompt": {"use_coords": use_coords, "use_order": use_order,
+                "legacy_uc": legacy_uc, "caption": {"base_caption": positive, "char_captions": []}},
             "v4_negative_prompt": {"use_coords": False, "use_order": False, "caption": {"base_caption": negative, "char_captions": []}}
         }
 
@@ -369,7 +377,17 @@ class GenerateNAID:
                     params["reference_strength_multiple"].append(strength)
 
             if "model" in option: model = option["model"]
-            if "v4_prompt" in option: params["v4_prompt"].update(option["v4_prompt"])
+
+            # NOTE
+            # Updating dictionaries in Python will clobber/overwrite existing values
+            # Instead, recursively merge the dictionaries so that we can compose base and character prompts
+
+            # Handle V4 options
+            if "v4_prompt" in option:
+                params["v4_prompt"] = merge_dicts_non_empty(params["v4_prompt"], option["v4_prompt"])
+
+            if "v4_negative_prompt" in option:
+                params["v4_negative_prompt"] = merge_dicts_non_empty(params["v4_negative_prompt"], option["v4_negative_prompt"])
 
             if "character_reference_single" in option:
                 ref = option["character_reference_single"]
@@ -393,7 +411,7 @@ class GenerateNAID:
                 params["width"], params["height"] = calculate_resolution(pixel_limit, (width, height))
             if steps > 28: params["steps"] = 28
 
-        if variety: params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(params["width"], params["height"])
+        if variety: params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(params["width"], params["height"], model)
         if sampler == "ddim" and "nai-diffusion-2" not in model: params["sampler"] = "ddim_v3"
         if action == "infill" and "nai-diffusion-2" not in model: model = f"{model}-inpainting"
         
@@ -405,15 +423,21 @@ class GenerateNAID:
         except Exception as e: print(f"[NovelAI] Anlas tracking failed (pre-gen): {e}")
 
         image = blank_image()
+        metadata = {}
         try:
             zipped_bytes = self._post_image(self.access_token, positive, model, action, params, timeout, retry)
             with zipfile.ZipFile(io.BytesIO(zipped_bytes)) as zipped:
                 image_bytes = zipped.read(zipped.infolist()[0])
 
-            full_output_folder, filename, counter, _, _ = folder_paths.get_save_image_path("NAI_autosave", self.output_dir)
+            ## save original png to comfy output dir
+            ## use basic logic to determine whether we should be saving to `img2img` or `txt2img` directory
+            save_type = "img2img" if action in ("img2img", "infill") else "txt2img"
+            output_type_dir = os.path.join(self.output_dir, save_type)
+            full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
+                "NAI_autosave", output_type_dir)
             file = f"{filename}_{counter:05}_.png"
             d = Path(full_output_folder)
-            d.mkdir(exist_ok=True)
+            d.mkdir(exist_ok=True, parents=True)
             (d / file).write_bytes(image_bytes)
             
             if start_anlas is not None:
@@ -425,12 +449,18 @@ class GenerateNAID:
                         print(f"[NovelAI] Anlas (post-gen): {final_anlas}")
                 except Exception as e: print(f"[NovelAI] Anlas tracking failed (post-gen): {e}")
 
+            # Save metadata JSON
+            metadata = get_metadata(image_bytes)
+
+            ## save image metadata to a sidecar file to make it easier to import with services such as Hydrus
+            save_metadata_json(action, d, file, metadata, model, params)
+
             image = bytes_to_image(image_bytes, keep_alpha)
         except Exception as e:
             if option and option.get("ignore_errors", False): print("ignore error:", e)
             else: raise e
 
-        return (image,)
+        return (image,metadata,)
 
 # -------------------------------------------------
 # Director Tool Augment Nodes
@@ -614,6 +644,73 @@ class V4NegativePrompt:
     def convert(self, negative_caption):
         return (negative_caption,)
 
+
+# GenerateNAID node extension: character prompt slots added
+# Add 'characters' to INPUT_TYPES of existing GenerateNAID and internally assemble char_captions in a metadata.yaml structure.
+# Replace existing GenerateNAID.INPUT_TYPES
+
+old_generate_naid_input_types = GenerateNAID.INPUT_TYPES
+
+def new_generate_naid_input_types(s):
+    types = old_generate_naid_input_types()
+    types["required"]["characters"] = ("CHARACTER_LIST_NAI", {"default": [], "forceInput": False, "multiline": True})
+    return types
+GenerateNAID.INPUT_TYPES = classmethod(new_generate_naid_input_types)
+
+# Add 'characters' to INPUT_TYPES of existing GenerateNAID and internally assemble char_captions in a metadata.yaml structure.
+
+old_generate_naid_generate = GenerateNAID.generate
+
+def new_generate_naid_generate(self, *args, **kwargs):
+    # characters is always the last argument
+    import inspect
+    sig = inspect.signature(old_generate_naid_generate)
+    params = list(sig.parameters.keys())
+    # Existing arguments + characters + option
+    option = kwargs.get('option', None)
+    characters = kwargs.get('characters', None)
+    if characters is None and len(args) >= len(params):
+        characters = args[len(params)-1]
+    # Build v4_prompt
+    if option is None:
+        option = {}
+    if characters:
+        # Same structure as metadata.yaml
+        char_captions = []
+        for idx, c in enumerate(characters):
+            centers = c.get("centers", [])
+            # Warn if centers is empty or None
+            if not centers or centers is None or not isinstance(centers, list) or not centers:
+                print(f"[WARN] Character index {idx} centers is empty or invalid: {centers}")
+            else:
+                # If centers is not in [{"x":..., "y":...}] format, fix it
+                if isinstance(centers, dict):
+                    centers = [centers]
+                elif isinstance(centers, list):
+                    # If it's a list but not a list of dicts, fix it
+                    if centers and not isinstance(centers[0], dict):
+                        print(f"[WARN] Unexpected format for centers: {centers}")
+                        centers = [{"x": centers[0], "y": centers[1]}] if len(centers) == 2 else []
+            char_captions.append({
+                "char_caption": c.get("char_caption", ""),
+                "centers": centers
+            })
+        if char_captions:
+            if "v4_prompt" not in option:
+                option["v4_prompt"] = {"caption": {}}
+            if "caption" not in option["v4_prompt"]:
+                option["v4_prompt"]["caption"] = {}
+            option["v4_prompt"]["caption"]["char_captions"] = char_captions
+    # Print option contents before sending to API
+    print("[DEBUG] API送信前 option:", option)
+    kwargs['option'] = option
+    # Remove characters from kwargs
+    if 'characters' in kwargs:
+        del kwargs['characters']
+    return old_generate_naid_generate(self, *args[:len(params)-1], **kwargs)
+
+GenerateNAID.generate = new_generate_naid_generate
+
 # -------------------------------------------------
 # Registration
 # -------------------------------------------------
@@ -635,8 +732,9 @@ NODE_CLASS_MAPPINGS = {
     "ColorizeNAID": ColorizeAugment,
     "EmotionNAID": EmotionAugment,
     "DeclutterNAID": DeclutterAugment,
-    "V4BasePrompt": V4BasePrompt,
-    "V4NegativePrompt": V4NegativePrompt,
+    "CharacterNAI": CharacterNAI,
+    "CharacterConcatenateNAI": CharacterConcatenateNAI,
+    "GetImageMetadata": GetImageMetadata,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -656,6 +754,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ColorizeNAID": "Colorize ✒️🅝🅐🅘",
     "EmotionNAID": "Emotion ✒️🅝🅐🅘",
     "DeclutterNAID": "Declutter ✒️🅝🅐🅘",
-    "V4BasePrompt": "V4 Base Prompt ✒️🅝🅐🅘",
-    "V4NegativePrompt": "V4 Negative Prompt ✒️🅝🅐🅘",
+    "CharacterNAI": "Character ✒️🅝🅐🅘",
+    "CharacterConcatenateNAI": "CharacterConcatenate ✒️🅝🅐🅘",
+    "GetImageMetadata": "Get Image Metadata ✒️🅝🅐🅘",
 }
