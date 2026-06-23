@@ -1,6 +1,8 @@
 import copy
 import os
 from pathlib import Path
+import time
+from contextlib import contextmanager
 import folder_paths
 import zipfile
 import json as _json
@@ -20,6 +22,19 @@ from PIL import Image as PILImage
 
 
 TOOLTIP_LIMIT_OPUS_FREE = "Limit image size and steps for free generation by Opus."
+
+@contextmanager
+def _naid_profile_step(enabled: bool, label: str):
+    if not enabled:
+        yield
+        return
+
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        print(f"[NovelAI][profile] {label}: {elapsed:.3f}s")
 
 # ------------------------------------------------------------------
 # Helper utilities
@@ -353,139 +368,167 @@ class GenerateNAID:
     def generate(self, limit_opus_free, width, height, positive, negative,
                  steps, cfg, decrisper, variety, smea, sampler, scheduler,
                  seed, uncond_scale, cfg_rescale, keep_alpha, use_coords, use_order, legacy_uc, option=None):
-        width, height = calculate_resolution(width * height, (width, height))
+        profile_enabled = True if option is None else option.get("profile", True)
+        total_start = time.perf_counter()
 
-        params = {
-            "params_version": 1, "width": width, "height": height, "scale": cfg, "sampler": sampler, "steps": steps,
-            "seed": seed, "n_samples": 1, "ucPreset": 3, "qualityToggle": False,
-            "sm": (smea == "SMEA" or smea == "SMEA+DYN") and sampler != "ddim",
-            "sm_dyn": (smea == "SMEA+DYN") and sampler != "ddim",
-            "dynamic_thresholding": decrisper, "controlnet_strength": 1.0, "add_original_image": False,
-            "cfg_rescale": cfg_rescale, "noise_schedule": scheduler, "legacy_v3_extend": False,
-            "uncond_scale": uncond_scale, "negative_prompt": negative, "prompt": positive,
-            "reference_image_multiple": [], "reference_information_extracted_multiple": [], "reference_strength_multiple": [],
-            "extra_noise_seed": seed,
-            "v4_prompt": {"use_coords": use_coords, "use_order": use_order,
-                "legacy_uc": legacy_uc, "caption": {"base_caption": positive, "char_captions": []}},
-            "v4_negative_prompt": {"use_coords": False, "use_order": False, "caption": {"base_caption": negative, "char_captions": []}}
-        }
+        with _naid_profile_step(profile_enabled, "calculate_resolution"):
+            width, height = calculate_resolution(width * height, (width, height))
 
-        model = "nai-diffusion-4-5-full"
-        action = "generate"
+        with _naid_profile_step(profile_enabled, "build base params"):
+            params = {
+                "params_version": 1, "width": width, "height": height, "scale": cfg, "sampler": sampler, "steps": steps,
+                "seed": seed, "n_samples": 1, "ucPreset": 3, "qualityToggle": False,
+                "sm": (smea == "SMEA" or smea == "SMEA+DYN") and sampler != "ddim",
+                "sm_dyn": (smea == "SMEA+DYN") and sampler != "ddim",
+                "dynamic_thresholding": decrisper, "controlnet_strength": 1.0, "add_original_image": False,
+                "cfg_rescale": cfg_rescale, "noise_schedule": scheduler, "legacy_v3_extend": False,
+                "uncond_scale": uncond_scale, "negative_prompt": negative, "prompt": positive,
+                "reference_image_multiple": [], "reference_information_extracted_multiple": [], "reference_strength_multiple": [],
+                "extra_noise_seed": seed,
+                "v4_prompt": {"use_coords": use_coords, "use_order": use_order,
+                              "legacy_uc": legacy_uc, "caption": {"base_caption": positive, "char_captions": []}},
+                "v4_negative_prompt": {"use_coords": False, "use_order": False, "caption": {"base_caption": negative, "char_captions": []}}
+            }
 
-        if sampler == "k_euler_ancestral" and scheduler != "native":
-            params["deliberate_euler_ancestral_bug"] = False
-            params["prefer_brownian"] = True
+            model = "nai-diffusion-4-5-full"
+            action = "generate"
+
+            if sampler == "k_euler_ancestral" and scheduler != "native":
+                params["deliberate_euler_ancestral_bug"] = False
+                params["prefer_brownian"] = True
 
         if option:
-            if "img2img" in option:
-                action = "img2img"
-                image, strength, noise = option["img2img"]
-                params["image"] = image_to_base64(resize_image(image, (width, height)))
-                params["strength"] = strength
-                params["noise"] = noise
-            elif "infill" in option:
-                action = "infill"
-                image, mask, add_original_image = option["infill"]
-                params["image"] = image_to_base64(resize_image(image, (width, height)))
-                params["mask"] = naimask_to_base64(resize_to_naimask(mask, (width, height), "4" in model))
-                params["add_original_image"] = add_original_image
+            with _naid_profile_step(profile_enabled, "apply option payloads"):
+                if "img2img" in option:
+                    action = "img2img"
+                    image, strength, noise = option["img2img"]
+                    with _naid_profile_step(profile_enabled, "img2img resize + base64"):
+                        params["image"] = image_to_base64(resize_image(image, (width, height)))
+                    params["strength"] = strength
+                    params["noise"] = noise
+                elif "infill" in option:
+                    action = "infill"
+                    image, mask, add_original_image = option["infill"]
+                    with _naid_profile_step(profile_enabled, "infill image resize + base64"):
+                        params["image"] = image_to_base64(resize_image(image, (width, height)))
+                    with _naid_profile_step(profile_enabled, "infill mask resize + base64"):
+                        params["mask"] = naimask_to_base64(resize_to_naimask(mask, (width, height), "4" in model))
+                    params["add_original_image"] = add_original_image
 
-            if "vibe" in option:
-                for vibe in option["vibe"]:
-                    vimg, information_extracted, strength = vibe
-                    params["reference_image_multiple"].append(image_to_base64(resize_image(vimg, (width, height))))
-                    params["reference_information_extracted_multiple"].append(information_extracted)
-                    params["reference_strength_multiple"].append(strength)
+                if "vibe" in option:
+                    with _naid_profile_step(profile_enabled, "vibe resize + base64 all"):
+                        for vibe in option["vibe"]:
+                            vimg, information_extracted, strength = vibe
+                            params["reference_image_multiple"].append(image_to_base64(resize_image(vimg, (width, height))))
+                            params["reference_information_extracted_multiple"].append(information_extracted)
+                            params["reference_strength_multiple"].append(strength)
 
-            if "model" in option: model = option["model"]
+                if "model" in option:
+                    model = option["model"]
 
-            # NOTE
-            # Updating dictionaries in Python will clobber/overwrite existing values
-            # Instead, recursively merge the dictionaries so that we can compose base and character prompts
+                # NOTE
+                # Updating dictionaries in Python will clobber/overwrite existing values
+                # Instead, recursively merge the dictionaries so that we can compose base and character prompts
 
-            # Handle V4 options
-            if "v4_prompt" in option:
-                params["v4_prompt"] = merge_dicts_non_empty(params["v4_prompt"], option["v4_prompt"])
+                # Handle V4 options
+                if "v4_prompt" in option:
+                    params["v4_prompt"] = merge_dicts_non_empty(params["v4_prompt"], option["v4_prompt"])
 
-            if "v4_negative_prompt" in option:
-                params["v4_negative_prompt"] = merge_dicts_non_empty(params["v4_negative_prompt"], option["v4_negative_prompt"])
+                if "v4_negative_prompt" in option:
+                    params["v4_negative_prompt"] = merge_dicts_non_empty(params["v4_negative_prompt"], option["v4_negative_prompt"])
 
-            if "character_reference_single" in option:
-                ref = option["character_reference_single"]
-                base_caption = "character&style" if ref["style_aware"] else "character"
-                ref_img = ref["image"]
-                _, h_raw, w_raw, _ = ref_img.shape
-                canvas_w, canvas_h = _choose_cr_canvas(w_raw, h_raw)
-                padded = pad_image_to_canvas(ref_img, (canvas_w, canvas_h))
-                params["director_reference_images"] = [image_to_base64(padded)]
-                params["director_reference_descriptions"] = [{"use_coords": False, "use_order": False, "legacy_uc": False, "caption": {"base_caption": base_caption, "char_captions": []}}]
-                params["director_reference_strength_values"] = [1.0]
-                params["director_reference_secondary_strength_values"] = [1.0 - ref["fidelity"]]
-                params["director_reference_information_extracted"] = [1.0]
+                if "character_reference_single" in option:
+                    with _naid_profile_step(profile_enabled, "character reference pad + base64"):
+                        ref = option["character_reference_single"]
+                        base_caption = "character&style" if ref["style_aware"] else "character"
+                        ref_img = ref["image"]
+                        _, h_raw, w_raw, _ = ref_img.shape
+                        canvas_w, canvas_h = _choose_cr_canvas(w_raw, h_raw)
+                        padded = pad_image_to_canvas(ref_img, (canvas_w, canvas_h))
+                        params["director_reference_images"] = [image_to_base64(padded)]
+                        params["director_reference_descriptions"] = [{"use_coords": False, "use_order": False, "legacy_uc": False, "caption": {"base_caption": base_caption, "char_captions": []}}]
+                        params["director_reference_strength_values"] = [1.0]
+                        params["director_reference_secondary_strength_values"] = [1.0 - ref["fidelity"]]
+                        params["director_reference_information_extracted"] = [1.0]
 
-        timeout = option.get("timeout", 120) if option else 120
-        retry = option.get("retry", 3) if option else 3
+        with _naid_profile_step(profile_enabled, "final param adjustments"):
+            timeout = option.get("timeout", 120) if option else 120
+            retry = option.get("retry", 3) if option else 3
 
-        if limit_opus_free:
-            pixel_limit = 1024 * 1024
-            if width * height > pixel_limit:
-                params["width"], params["height"] = calculate_resolution(pixel_limit, (width, height))
-            if steps > 28: params["steps"] = 28
+            if limit_opus_free:
+                pixel_limit = 1024 * 1024
+                if width * height > pixel_limit:
+                    params["width"], params["height"] = calculate_resolution(pixel_limit, (width, height))
+                if steps > 28: params["steps"] = 28
 
-        if variety: params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(params["width"], params["height"], model)
-        if sampler == "ddim" and "nai-diffusion-2" not in model: params["sampler"] = "ddim_v3"
-        if action == "infill" and "nai-diffusion-2" not in model: model = f"{model}-inpainting"
-        
+            if variety: params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(params["width"], params["height"], model)
+            if sampler == "ddim" and "nai-diffusion-2" not in model: params["sampler"] = "ddim_v3"
+            if action == "infill" and "nai-diffusion-2" not in model: model = f"{model}-inpainting"
+
         start_anlas = None
         try:
-            user_data = _get_user_data(self.access_token, timeout, retry)
-            start_anlas = user_data.get("subscription", {}).get("trainingStepsLeft")
-            if start_anlas is not None: print(f"[NovelAI] Anlas (pre-gen): {start_anlas}")
+            with _naid_profile_step(profile_enabled, "pre-gen anlas /user/data"):
+                user_data = _get_user_data(self.access_token, timeout, retry)
+                start_anlas = user_data.get("subscription", {}).get("trainingStepsLeft")
+                if start_anlas is not None: print(f"[NovelAI] Anlas (pre-gen): {start_anlas}")
         except Exception as e: print(f"[NovelAI] Anlas tracking failed (pre-gen): {e}")
 
         image = blank_image()
         metadata = {}
         try:
-            zipped_bytes = self._post_image(self.access_token, positive, model, action, params, timeout, retry)
-            with zipfile.ZipFile(io.BytesIO(zipped_bytes)) as zipped:
-                image_bytes = zipped.read(zipped.infolist()[0])
+            with _naid_profile_step(profile_enabled, "NovelAI generate-image POST"):
+                zipped_bytes = self._post_image(self.access_token, positive, model, action, params, timeout, retry)
+
+            with _naid_profile_step(profile_enabled, "zip read image bytes"):
+                with zipfile.ZipFile(io.BytesIO(zipped_bytes)) as zipped:
+                    image_bytes = zipped.read(zipped.infolist()[0])
 
             ## save original png to comfy output dir
             ## use basic logic to determine whether we should be saving to `img2img` or `txt2img` directory
-            save_type = "img2img" if action in ("img2img", "infill") else "txt2img"
-            output_type_dir = os.path.join(self.output_dir, save_type)
-            full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
-                "NAI_autosave", output_type_dir)
+            with _naid_profile_step(profile_enabled, "autosave path setup"):
+                save_type = "img2img" if action in ("img2img", "infill") else "txt2img"
+                output_type_dir = os.path.join(self.output_dir, save_type)
+                full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
+                    "NAI_autosave", output_type_dir)
 
-            autosave_format = option.get("autosave_format", "png") if option else "png"
-            webp_quality = option.get("webp_quality", 85) if option else 85
-            file_ext = "webp" if autosave_format == "webp" else "png"
+                autosave_format = option.get("autosave_format", "png") if option else "png"
+                webp_quality = option.get("webp_quality", 85) if option else 85
+                file_ext = "webp" if autosave_format == "webp" else "png"
 
-            file = f"{filename}_{counter:05}_.{file_ext}"
-            d = Path(full_output_folder)
-            d.mkdir(exist_ok=True, parents=True)
-            save_image_with_metadata(image_bytes, d / file, autosave_format, webp_quality)
+                file = f"{filename}_{counter:05}_.{file_ext}"
+                d = Path(full_output_folder)
+                d.mkdir(exist_ok=True, parents=True)
+
+            with _naid_profile_step(profile_enabled, f"save image with metadata ({autosave_format}, quality={webp_quality})"):
+                save_image_with_metadata(image_bytes, d / file, autosave_format, webp_quality)
 
             if start_anlas is not None:
                 try:
-                    user_data_final = _get_user_data(self.access_token, timeout, retry)
-                    final_anlas = user_data_final.get("subscription", {}).get("trainingStepsLeft")
-                    if final_anlas is not None:
-                        print(f"[NovelAI] Generation cost: {start_anlas - final_anlas} Anlas")
-                        print(f"[NovelAI] Anlas (post-gen): {final_anlas}")
+                    with _naid_profile_step(profile_enabled, "post-gen anlas /user/data"):
+                        user_data_final = _get_user_data(self.access_token, timeout, retry)
+                        final_anlas = user_data_final.get("subscription", {}).get("trainingStepsLeft")
+                        if final_anlas is not None:
+                            print(f"[NovelAI] Generation cost: {start_anlas - final_anlas} Anlas")
+                            print(f"[NovelAI] Anlas (post-gen): {final_anlas}")
                 except Exception as e: print(f"[NovelAI] Anlas tracking failed (post-gen): {e}")
 
             # Save metadata JSON
-            metadata = get_metadata(image_bytes)
+            with _naid_profile_step(profile_enabled, "extract metadata"):
+                metadata = get_metadata(image_bytes)
 
             ## save image metadata to a sidecar file to make it easier to import with services such as Hydrus
-            save_metadata_json(action, d, file, metadata, model, params)
+            with _naid_profile_step(profile_enabled, "save metadata sidecar JSON"):
+                save_metadata_json(action, d, file, metadata, model, params)
 
-            image = bytes_to_image(image_bytes, keep_alpha)
+            with _naid_profile_step(profile_enabled, "bytes_to_image"):
+                image = bytes_to_image(image_bytes, keep_alpha)
         except Exception as e:
             if option and option.get("ignore_errors", False): print("ignore error:", e)
             else: raise e
+        finally:
+            if profile_enabled:
+                total_elapsed = time.perf_counter() - total_start
+                print(f"[NovelAI][profile] TOTAL GenerateNAID.generate: {total_elapsed:.3f}s")
 
         return (image,metadata,)
 
