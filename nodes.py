@@ -569,8 +569,9 @@ class GenerateNAID:
                 metadata = get_metadata(image_bytes)
 
             ## save image metadata to a sidecar file to make it easier to import with services such as Hydrus
+            save_metadata_json(action, d, file, metadata, model, params)
             with _naid_profile_step(profile_enabled, "save metadata sidecar JSON"):
-                save_metadata_json(action, d, file, metadata, model, params)
+                pass
 
             with _naid_profile_step(profile_enabled, "bytes_to_image"):
                 image = bytes_to_image(image_bytes, keep_alpha)
