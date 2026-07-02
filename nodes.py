@@ -555,14 +555,14 @@ class GenerateNAID:
                 save_image_with_metadata(image_bytes, d / file, image_format, webp_quality)
 
             if track_anlas and start_anlas is not None:
-                    try:
-                        user_data_final = _get_user_data(self.access_token, timeout, retry)
-                        training_steps_left_final = user_data_final.get("subscription", {}).get("trainingStepsLeft")
-                        final_anlas = _training_steps_total(training_steps_left_final)
-                        if final_anlas is not None:
-                            print(f"[NovelAI] Generation cost: {start_anlas - final_anlas} Anlas")
-                            print(f"[NovelAI] Anlas (post-gen): {final_anlas}")
-                    except Exception as e: print(f"[NovelAI] Anlas tracking failed (post-gen): {e}")
+                try:
+                    user_data_final = _get_user_data(self.access_token, timeout, retry)
+                    training_steps_left_final = user_data_final.get("subscription", {}).get("trainingStepsLeft")
+                    final_anlas = _training_steps_total(training_steps_left_final)
+                    if final_anlas is not None:
+                        print(f"[NovelAI] Generation cost: {start_anlas - final_anlas} Anlas")
+                        print(f"[NovelAI] Anlas (post-gen): {final_anlas}")
+                except Exception as e: print(f"[NovelAI] Anlas tracking failed (post-gen): {e}")
 
             # Save metadata JSON
             with _naid_profile_step(profile_enabled, "extract metadata"):
