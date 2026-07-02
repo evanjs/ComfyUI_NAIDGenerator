@@ -4,6 +4,7 @@ import argon2
 from xml.sax.saxutils import escape, unescape
 
 import base64
+import zlib
 import dotenv
 from os import environ as env
 import io
@@ -209,7 +210,255 @@ def prompt_to_nai(prompt, weight_per_brace=0.05, syntax_mode="brace"):
     return prompt_stack_to_nai(prompt_to_stack(prompt.replace("\(", "（").replace("\)", "）")), weight_per_brace, syntax_mode).replace("（", "(").replace("）",")")
 
 
+_NAI_METADATA_KEY_ALIASES = {
+    "comment": "Comment",
+    "description": "Description",
+    "generation_time": "Generation_time",
+    "software": "Software",
+    "source": "Source",
+    "title": "Title",
+    "documentname": "Title",
+    "imagedescription": "Description",
+}
+
+_EXIF_METADATA_SKIP_KEYS = {
+    "ExifOffset",
+}
+
+
+def _canonical_metadata_key(key):
+    key = str(key)
+    return _NAI_METADATA_KEY_ALIASES.get(key.lower(), key)
+
+
+def _decode_metadata_value(value, encoding="utf-8"):
+    if isinstance(value, bytes):
+        return value.decode(encoding, errors="replace")
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return None
+
+
+def _store_metadata_value(metadata, key, value, overwrite=True):
+    key = _canonical_metadata_key(key)
+
+    if key in {"exif", "icc_profile"}:
+        return
+
+    value = _decode_metadata_value(value)
+    if value is None:
+        return
+
+    if overwrite or key not in metadata:
+        metadata[key] = value
+
+
+def _clean_xmp_value(value):
+    value = value.strip()
+    if value.startswith("<![CDATA[") and value.endswith("]]>"):
+        value = value[len("<![CDATA["):-len("]]>")]
+    return unescape(value.strip())
+
+
+def _extract_nai_xmp_metadata(xmp):
+    xmp_text = _decode_metadata_value(xmp)
+    if not xmp_text:
+        return {}
+
+    metadata = {}
+
+    for match in re.finditer(
+        r"<(?:[\w.-]+:)?([A-Za-z_][\w.-]*)\b[^>]*>(.*?)</(?:[\w.-]+:)?\1>",
+        xmp_text,
+        re.DOTALL,
+    ):
+        key = _canonical_metadata_key(match.group(1))
+        if key in {"Comment", "Description", "Generation_time", "Software", "Source", "Title"}:
+            metadata[key] = _clean_xmp_value(match.group(2))
+
+    for match in re.finditer(
+        r"\b(?:[\w.-]+:)?([A-Za-z_][\w.-]*)=(['\"])(.*?)\2",
+        xmp_text,
+        re.DOTALL,
+    ):
+        key = _canonical_metadata_key(match.group(1))
+        if key in {"Comment", "Description", "Generation_time", "Software", "Source", "Title"}:
+            metadata.setdefault(key, _clean_xmp_value(match.group(3)))
+
+    return metadata
+
+
+def _extract_png_text_metadata(image_bytes):
+    if not isinstance(image_bytes, bytes):
+        return {}
+
+    if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return {}
+
+    metadata = {}
+    offset = 8
+
+    while offset + 8 <= len(image_bytes):
+        length = struct.unpack(">I", image_bytes[offset:offset + 4])[0]
+        chunk_type = image_bytes[offset + 4:offset + 8]
+        data_start = offset + 8
+        data_end = data_start + length
+        data = image_bytes[data_start:data_end]
+
+        if data_end + 4 > len(image_bytes):
+            break
+
+        try:
+            if chunk_type == b"tEXt":
+                key, value = data.split(b"\x00", 1)
+                _store_metadata_value(
+                    metadata,
+                    key.decode("latin-1", errors="replace"),
+                    value.decode("latin-1", errors="replace"),
+                )
+
+            elif chunk_type == b"zTXt":
+                key, rest = data.split(b"\x00", 1)
+                compression_method = rest[0]
+                compressed_value = rest[1:]
+
+                if compression_method == 0:
+                    _store_metadata_value(
+                        metadata,
+                        key.decode("latin-1", errors="replace"),
+                        zlib.decompress(compressed_value).decode("latin-1", errors="replace"),
+                    )
+
+            elif chunk_type == b"iTXt":
+                key, rest = data.split(b"\x00", 1)
+                compression_flag = rest[0]
+                compression_method = rest[1]
+                rest = rest[2:]
+
+                language_tag, rest = rest.split(b"\x00", 1)
+                translated_key, text = rest.split(b"\x00", 1)
+
+                if compression_flag == 1 and compression_method == 0:
+                    text = zlib.decompress(text)
+
+                _store_metadata_value(
+                    metadata,
+                    key.decode("utf-8", errors="replace"),
+                    text.decode("utf-8", errors="replace"),
+                )
+        except Exception:
+            pass
+
+        offset = data_end + 4
+
+        if chunk_type == b"IEND":
+            break
+
+    return metadata
+
+
+def _decode_exif_user_comment(value):
+    if isinstance(value, str):
+        return value
+
+    if not isinstance(value, bytes):
+        return None
+
+    if value.startswith(b"ASCII\x00\x00\x00"):
+        return value[8:].decode("ascii", errors="replace").rstrip("\x00")
+
+    if value.startswith(b"UNICODE\x00"):
+        return value[8:].decode("utf-16", errors="replace").rstrip("\x00")
+
+    if value.startswith(b"JIS\x00\x00\x00\x00\x00"):
+        return value[8:].decode("shift_jis", errors="replace").rstrip("\x00")
+
+    return value.decode("utf-8", errors="replace").rstrip("\x00")
+
+
+def _extract_exif_metadata(image):
+    metadata = {}
+
+    if not hasattr(image, "_getexif"):
+        return metadata
+
+    try:
+        exif = image._getexif()
+    except Exception:
+        return metadata
+
+    if not exif:
+        return metadata
+
+    for key, value in exif.items():
+        tag = ExifTags.TAGS.get(key, str(key))
+
+        if tag in _EXIF_METADATA_SKIP_KEYS:
+            continue
+
+        if tag == "UserComment":
+            comment = _decode_exif_user_comment(value)
+            if comment:
+                metadata.setdefault("Comment", comment)
+            continue
+
+        canonical_key = _canonical_metadata_key(tag)
+        decoded_value = _decode_metadata_value(value)
+
+        if decoded_value is None:
+            continue
+
+        if tag == "Software" and isinstance(decoded_value, str) and decoded_value.startswith("NovelAI Diffusion"):
+            metadata.setdefault("Source", decoded_value)
+            metadata.setdefault("Software", "NovelAI")
+            continue
+
+        if canonical_key != tag:
+            metadata.setdefault(canonical_key, decoded_value)
+            continue
+
+        if canonical_key in {"Comment", "Description", "Generation_time", "Software", "Source", "Title"}:
+            metadata.setdefault(canonical_key, decoded_value)
+
+    return metadata
+
+
+def _normalize_nai_comment_metadata(metadata):
+    comment = metadata.get("Comment")
+
+    if not isinstance(comment, str):
+        return metadata
+
+    try:
+        parsed_comment = json.loads(comment)
+    except json.JSONDecodeError:
+        return metadata
+
+    if not isinstance(parsed_comment, dict):
+        return metadata
+
+    nested_comment = parsed_comment.get("Comment")
+
+    if isinstance(nested_comment, str):
+        for key, value in parsed_comment.items():
+            if key == "Comment":
+                continue
+
+            _store_metadata_value(metadata, key, value, overwrite=False)
+
+        try:
+            metadata["Comment"] = json.loads(nested_comment)
+        except json.JSONDecodeError:
+            metadata["Comment"] = nested_comment
+    else:
+        metadata["Comment"] = parsed_comment
+
+    return metadata
+
+
 def get_metadata(image):
+    raw_image_bytes = image if isinstance(image, bytes) else None
+
     if isinstance(image, bytes):
         # Handle bytes input
         i = Image.open(io.BytesIO(image))
@@ -228,32 +477,35 @@ def get_metadata(image):
         i = image
 
     metadata = {}
-    if hasattr(i, '_getexif') and i._getexif() is not None:
+
+    if raw_image_bytes:
+        metadata.update(_extract_png_text_metadata(raw_image_bytes))
+
+    if hasattr(i, "info"):
+        for key, value in i.info.items():
+            if key in {"exif", "icc_profile"}:
+                continue
+
+            if key in {"xmp", "XML:com.adobe.xmp"}:
+                for xmp_key, xmp_value in _extract_nai_xmp_metadata(value).items():
+                    _store_metadata_value(metadata, xmp_key, xmp_value)
+                continue
+
+            _store_metadata_value(metadata, key, value)
+
+    if hasattr(i, "text"):
         try:
-            metadata = {ExifTags.TAGS[k]: str(v) for k, v in i._getexif().items()
-                        if k in ExifTags.TAGS and isinstance(v, (str, int, float, bool))}
-        except:
+            for key, value in i.text.items():
+                _store_metadata_value(metadata, key, value)
+        except Exception:
             pass
 
-    if hasattr(i, 'info'):
-        if "Comment" in i.info:
-            metadata["Comment"] = i.info["Comment"]
-        elif "xmp" in i.info:
-            xmp = i.info["xmp"]
-            if isinstance(xmp, bytes):
-                xmp = xmp.decode("utf-8", errors="replace")
+    for key, value in _extract_exif_metadata(i).items():
+        metadata.setdefault(key, value)
 
-            match = re.search(r"<nai:Comment>(.*?)</nai:Comment>", xmp, re.DOTALL)
-            if match:
-                metadata["Comment"] = unescape(match.group(1))
-            else:
-                metadata["xmp"] = xmp
-        else:
-            for key, value in i.info.items():
-                if isinstance(value, (str, int, float, bool)):
-                    metadata[key] = value
+    _normalize_nai_comment_metadata(metadata)
 
-    return (str(metadata),)
+    return (json.dumps(metadata, ensure_ascii=False),)
 
 
 def get_nai_comment(image_bytes):
@@ -354,34 +606,37 @@ def save_metadata_json(action, d, file, metadata, model, params):
         else:
             metadata_str = str(metadata)
 
+        parsed_metadata = None
+
         # First, convert the string representation to an actual dictionary
-        if isinstance(metadata_str, str) and "Comment" in metadata_str:
-            # Extract the Comment value - this is the JSON string we want to parse
-            import ast
+        if isinstance(metadata_str, str):
             try:
-                # Convert the string representation of a dict to an actual dict
-                metadata_dict_raw = ast.literal_eval(metadata_str)
+                parsed_metadata = json.loads(metadata_str)
+            except json.JSONDecodeError:
+                # Extract the Comment value - this is the JSON string we want to parse
+                import ast
+                try:
+                    # Convert the string representation of a dict to an actual dict
+                    parsed_metadata = ast.literal_eval(metadata_str)
+                except (SyntaxError, ValueError):
+                    parsed_metadata = None
 
-                if isinstance(metadata_dict_raw, dict) and "Comment" in metadata_dict_raw:
-                    comment_json_str = metadata_dict_raw["Comment"]
+        if isinstance(parsed_metadata, dict):
+            comment = parsed_metadata.get("Comment")
 
-                    # Parse the JSON string in the Comment field
-                    try:
-                        comment_json = json.loads(comment_json_str)
-                        # Replace the metadata with the properly parsed JSON
-                        metadata_dict["metadata"] = comment_json
-                    except json.JSONDecodeError:
-                        # If Comment isn't valid JSON, use the whole metadata dict
-                        metadata_dict["metadata"] = metadata_dict_raw
-                else:
-                    # Use the parsed dict as is
-                    metadata_dict["metadata"] = metadata_dict_raw
-            except (SyntaxError, ValueError):
-                # If we can't parse the string as a dict, store it raw
-                metadata_dict["metadata"] = {"raw": metadata_str}
+            if isinstance(comment, dict):
+                metadata_dict["metadata"] = comment
+            elif isinstance(comment, str):
+                try:
+                    metadata_dict["metadata"] = json.loads(comment)
+                except json.JSONDecodeError:
+                    metadata_dict["metadata"] = parsed_metadata
+            else:
+                metadata_dict["metadata"] = parsed_metadata
         else:
             # Handle case where metadata isn't a string or doesn't contain Comment
             metadata_dict["metadata"] = {"raw": metadata_str}
+
     except Exception as e:
         print(f"Warning: Could not parse metadata: {e}")
         if isinstance(metadata, tuple) and len(metadata) > 0:
@@ -397,4 +652,4 @@ def save_metadata_json(action, d, file, metadata, model, params):
         }
     }
     metadata_file = f"{file}.json"
-    (d / metadata_file).write_text(json.dumps(metadata_dict, indent=2))
+    (d / metadata_file).write_text(json.dumps(metadata_dict, indent=2, ensure_ascii=False))

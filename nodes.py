@@ -52,6 +52,74 @@ def _naid_profile_step(enabled: bool, label: str):
         elapsed = time.perf_counter() - start
         print(f"[NovelAI][profile] {label}: {elapsed:.3f}s")
 
+
+def _parse_json_or_json_stream(value):
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+    if not text:
+        return {}
+
+    try:
+        return _json.loads(text)
+    except _json.JSONDecodeError:
+        pass
+
+    stream_text = text
+    if stream_text.startswith("[") and stream_text.endswith("]"):
+        stream_text = stream_text[1:-1].strip()
+
+    decoder = _json.JSONDecoder()
+    values = []
+    index = 0
+
+    while index < len(stream_text):
+        while index < len(stream_text) and stream_text[index].isspace():
+            index += 1
+
+        if index < len(stream_text) and stream_text[index] == ",":
+            index += 1
+            continue
+
+        if index >= len(stream_text):
+            break
+
+        try:
+            parsed_value, next_index = decoder.raw_decode(stream_text, index)
+        except _json.JSONDecodeError:
+            return None
+
+        values.append(parsed_value)
+        index = next_index
+
+    if not values:
+        return None
+
+    if len(values) == 1:
+        return values[0]
+
+    if all(isinstance(item, dict) for item in values):
+        merged = {}
+        for item in values:
+            merged.update(item)
+        return merged
+
+    return values
+
+
+def _metadata_to_json_string(metadata):
+    if isinstance(metadata, tuple) and len(metadata) == 1:
+        metadata = metadata[0]
+
+    parsed_metadata = _parse_json_or_json_stream(metadata)
+
+    if parsed_metadata is None:
+        parsed_metadata = {"raw": str(metadata)}
+
+    return _json.dumps(parsed_metadata, ensure_ascii=False)
+
+
 # ------------------------------------------------------------------
 # Helper utilities
 # ------------------------------------------------------------------
@@ -526,7 +594,7 @@ class GenerateNAID:
                 except Exception as e: print(f"[NovelAI] Anlas tracking failed (pre-gen): {e}")
 
         image = blank_image()
-        metadata = {}
+        metadata = "{}"
         try:
             with _naid_profile_step(profile_enabled, "NovelAI generate-image POST"):
                 zipped_bytes = self._post_image(self.access_token, positive, model, action, params, timeout, retry)
@@ -566,7 +634,7 @@ class GenerateNAID:
 
             # Save metadata JSON
             with _naid_profile_step(profile_enabled, "extract metadata"):
-                metadata = get_metadata(image_bytes)
+                metadata = _metadata_to_json_string(get_metadata(image_bytes))
 
             ## save image metadata to a sidecar file to make it easier to import with services such as Hydrus
             save_metadata_json(action, d, file, metadata, model, params)
