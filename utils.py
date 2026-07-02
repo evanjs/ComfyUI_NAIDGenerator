@@ -4,6 +4,7 @@ import argon2
 from xml.sax.saxutils import escape, unescape
 
 import base64
+import struct
 import zlib
 import dotenv
 from os import environ as env
@@ -478,8 +479,13 @@ def get_metadata(image):
 
     metadata = {}
 
+    metadata = {}
+
     if raw_image_bytes:
-        metadata.update(_extract_png_text_metadata(raw_image_bytes))
+        try:
+            metadata.update(_extract_png_text_metadata(raw_image_bytes))
+        except Exception as e:
+            print(f"Warning: Could not parse PNG text metadata: {e}")
 
     if hasattr(i, "info"):
         for key, value in i.info.items():
