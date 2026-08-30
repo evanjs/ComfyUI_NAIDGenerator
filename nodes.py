@@ -522,6 +522,12 @@ class GenerateNAID:
         profile_enabled = True if option is None else option.get("profile", True)
         total_start = time.perf_counter()
 
+        if characters and option and option.get("characters"):
+            raise ValueError(
+                "Connect either the direct characters input or CharacterPromptOption "
+                "nodes, not both."
+            )
+
         with _naid_profile_step(profile_enabled, "calculate_resolution"):
             width, height = calculate_resolution(width * height, (width, height))
 
@@ -547,39 +553,6 @@ class GenerateNAID:
             if sampler == "k_euler_ancestral" and scheduler != "native":
                 params["deliberate_euler_ancestral_bug"] = False
                 params["prefer_brownian"] = True
-
-            if characters:
-                char_captions = []
-                negative_char_captions = []
-
-                for index, character in enumerate(characters):
-                    centers = character.get("centers", [])
-                    if isinstance(centers, dict):
-                        centers = [centers]
-                    elif (
-                        isinstance(centers, list)
-                        and len(centers) == 2
-                        and not isinstance(centers[0], dict)
-                    ):
-                        centers = [{"x": centers[0], "y": centers[1]}]
-                    elif not isinstance(centers, list):
-                        print(
-                            f"[WARN] Character index {index} has invalid centers: "
-                            f"{centers}"
-                        )
-                        centers = []
-
-                    char_captions.append({
-                        "char_caption": character.get("char_caption", ""),
-                        "centers": centers,
-                    })
-                    negative_char_captions.append({
-                        "char_caption": character.get("negative_caption", ""),
-                        "centers": centers,
-                    })
-
-                params["v4_prompt"]["caption"]["char_captions"] = char_captions
-                params["v4_negative_prompt"]["caption"]["char_captions"] = negative_char_captions
 
             if option:
                 with _naid_profile_step(profile_enabled, "apply option payloads"):
@@ -625,24 +598,53 @@ class GenerateNAID:
                     params["v4_prompt"] = merge_dicts_non_empty(params["v4_prompt"], option["v4_prompt"])
 
                 if "v4_negative_prompt" in option:
-                    params["v4_negative_prompt"] = merge_dicts_non_empty(params["v4_negative_prompt"], option["v4_negative_prompt"])
+                    params["v4_negative_prompt"] = merge_dicts_non_empty(
+                        params["v4_negative_prompt"],
+                        option["v4_negative_prompt"],
+                    )
 
-            if "characters" in option:
+                positive_caption = params["v4_prompt"].get("caption", {})
+                positive_base_caption = positive_caption.get("base_caption")
+                if isinstance(positive_base_caption, str) and positive_base_caption.strip():
+                    positive = positive_base_caption
+                    params["prompt"] = positive
+
+                # Keep the legacy/top-level channels synchronized with the V4
+                # captions. The request body uses `positive` for `input`, so
+                # updating only `params["v4_prompt"]` drops profile/artist
+                # tags from the effective generation prompt.
+                negative_caption = params["v4_negative_prompt"].get("caption", {})
+                negative_base_caption = negative_caption.get("base_caption")
+                if isinstance(negative_base_caption, str) and negative_base_caption.strip():
+                    negative = negative_base_caption
+                    params["negative_prompt"] = negative
+
+            if option and "characters" in option:
                 chars = option["characters"]
                 use_coords = any(c["use_position"] for c in chars)
                 use_order = any(c["use_order"] for c in chars)
                 params["v4_prompt"]["caption"]["char_captions"] = [
-                    {"char_caption": c["positive"], "centers": [{"x": c["x"], "y": c["y"]}]} for c in chars
+                    {
+                        "char_caption": c["positive"],
+                        "centers": [{"x": c["x"], "y": c["y"]}]
+                        if c["use_position"] else [],
+                    }
+                    for c in chars
                 ]
                 params["v4_prompt"]["use_coords"] = use_coords
                 params["v4_prompt"]["use_order"] = use_order
                 params["v4_negative_prompt"]["caption"]["char_captions"] = [
-                    {"char_caption": c["negative"], "centers": [{"x": c["x"], "y": c["y"]}]} for c in chars
+                    {
+                        "char_caption": c["negative"],
+                        "centers": [{"x": c["x"], "y": c["y"]}]
+                        if c["use_position"] else [],
+                    }
+                    for c in chars
                 ]
                 params["v4_negative_prompt"]["use_coords"] = use_coords
                 params["v4_negative_prompt"]["use_order"] = use_order
 
-            if "character_reference_single" in option:
+            if option and "character_reference_single" in option:
                 with _naid_profile_step(profile_enabled, "character reference pad + base64"):
                     ref = option["character_reference_single"]
                     base_caption = "character&style" if ref["style_aware"] else "character"
@@ -661,6 +663,38 @@ class GenerateNAID:
                     params["director_reference_secondary_strength_values"] = [1.0 - ref["fidelity"]]
                     params["director_reference_information_extracted"] = [1.0]
 
+            if characters:
+                positive_captions = []
+                negative_captions = []
+
+                for index, character in enumerate(characters):
+                    if not isinstance(character, dict):
+                        raise TypeError(
+                            f"Character index {index} must be a CHARACTER_NAI object"
+                        )
+
+                    centers = character.get("centers", [])
+                    if (
+                        not isinstance(centers, list)
+                        or not all(isinstance(center, dict) for center in centers)
+                    ):
+                        raise ValueError(
+                            f"Character index {index} has invalid centers; "
+                            "expected a list of objects"
+                        )
+
+                    positive_captions.append({
+                        "char_caption": str(character.get("char_caption", "")),
+                        "centers": centers,
+                    })
+                    negative_captions.append({
+                        "char_caption": str(character.get("negative_caption", "")),
+                        "centers": centers,
+                    })
+
+                params["v4_prompt"]["caption"]["char_captions"] = positive_captions
+                params["v4_negative_prompt"]["caption"]["char_captions"] = negative_captions
+
             with _naid_profile_step(profile_enabled, "final param adjustments"):
                 timeout = option.get("timeout", 120) if option else 120
                 retry = option.get("retry", 3) if option else 3
@@ -671,7 +705,10 @@ class GenerateNAID:
                 if limit_opus_free:
                     pixel_limit = 1024 * 1024
                     if width * height > pixel_limit:
-                        params["width"], params["height"] = calculate_resolution(pixel_limit, (width, height))
+                        params["width"], params["height"] = calculate_resolution(
+                            pixel_limit,
+                            (width, height),
+                        )
                     if steps > 28:
                         params["steps"] = 28
 
@@ -952,14 +989,14 @@ class V4NegativePrompt:
 old_generate_naid_input_types = GenerateNAID.INPUT_TYPES
 
 def new_generate_naid_input_types(s):
-    types = old_generate_naid_input_types()
-    types["required"]["characters"] = (
+    types = _copy.deepcopy(old_generate_naid_input_types())
+    types.setdefault("optional", {})["characters"] = (
         "CHARACTER_LIST_NAI",
-        {"default": [], "forceInput": False},
+        {"forceInput": True},
     )
     return types
 
-GenerateNAID.INPUT_TYPES = classmethod(new_generate_naid_input_types)   
+GenerateNAID.INPUT_TYPES = classmethod(new_generate_naid_input_types)
 
 # -------------------------------------------------
 # Registration
