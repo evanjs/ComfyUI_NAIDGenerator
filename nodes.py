@@ -682,23 +682,20 @@ class GenerateNAID:
                 except Exception as e: print(f"[NovelAI] Anlas tracking failed (post-gen): {e}")
 
             # Save metadata JSON
-                with _naid_profile_step(profile_enabled, "extract metadata"):
-                    try:
-                        metadata = _metadata_to_json_string(get_metadata(image_bytes))
-                    except Exception as e:
-                        print(f"Warning: Could not extract image metadata: {e}")
-                        metadata = "{}"
+            with _naid_profile_step(profile_enabled, "extract metadata"):
+                try:
+                    metadata = _metadata_to_json_string(get_metadata(image_bytes))
+                except Exception as e:
+                    print(f"Warning: Could not extract image metadata: {e}")
+                    metadata = "{}"
 
-                ## save image metadata to a sidecar file to make it easier to import with services such as Hydrus
+            # Save image metadata to a sidecar file to make importing into services such as Hydrus easier.
+            with _naid_profile_step(profile_enabled, "save metadata sidecar JSON"):
                 save_metadata_json(action, d, file, metadata, model, params)
-                with _naid_profile_step(profile_enabled, "save metadata sidecar JSON"):
-                    pass
-
-                with _naid_profile_step(profile_enabled, "bytes_to_image"):
-                    image = bytes_to_image(image_bytes, keep_alpha)
 
             with _naid_profile_step(profile_enabled, "bytes_to_image"):
                 image = bytes_to_image(image_bytes, keep_alpha)
+
         except Exception as e:
             if option and option.get("ignore_errors", False): print("ignore error:", e)
             else: raise e
