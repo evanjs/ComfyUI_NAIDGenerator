@@ -517,7 +517,8 @@ class GenerateNAID:
 
     def generate(self, limit_opus_free, width, height, positive, negative,
                  steps, cfg, decrisper, variety, smea, sampler, scheduler,
-                 seed, uncond_scale, cfg_rescale, keep_alpha, use_coords, use_order, legacy_uc, option=None):
+                 seed, uncond_scale, cfg_rescale, keep_alpha, use_coords, use_order, legacy_uc,
+                 characters=None, option=None):
         profile_enabled = True if option is None else option.get("profile", True)
         total_start = time.perf_counter()
 
@@ -547,8 +548,44 @@ class GenerateNAID:
                 params["deliberate_euler_ancestral_bug"] = False
                 params["prefer_brownian"] = True
 
-        if option:
-            with _naid_profile_step(profile_enabled, "apply option payloads"):
+            if characters:
+                char_captions = []
+                negative_char_captions = []
+
+                for index, character in enumerate(characters):
+                    centers = character.get("centers", [])
+                    if isinstance(centers, dict):
+                        centers = [centers]
+                    elif (
+                        isinstance(centers, list)
+                        and len(centers) == 2
+                        and not isinstance(centers[0], dict)
+                    ):
+                        centers = [{"x": centers[0], "y": centers[1]}]
+                    elif not isinstance(centers, list):
+                        print(
+                            f"[WARN] Character index {index} has invalid centers: "
+                            f"{centers}"
+                        )
+                        centers = []
+
+                    char_captions.append({
+                        "char_caption": character.get("char_caption", ""),
+                        "centers": centers,
+                    })
+                    negative_char_captions.append({
+                        "char_caption": character.get("negative_caption", ""),
+                        "centers": centers,
+                    })
+
+                params["v4_prompt"]["caption"]["char_captions"] = char_captions
+                params["v4_negative_prompt"]["caption"]["char_captions"] = negative_char_captions
+
+            if option:
+                with _naid_profile_step(profile_enabled, "apply option payloads"):
+                    if "model" in option:
+                        model = option["model"]
+
                 if "img2img" in option:
                     action = "img2img"
                     image, strength, noise = option["img2img"]
@@ -562,7 +599,13 @@ class GenerateNAID:
                     with _naid_profile_step(profile_enabled, "infill image resize + base64"):
                         params["image"] = image_to_base64(resize_image(image, (width, height)))
                     with _naid_profile_step(profile_enabled, "infill mask resize + base64"):
-                        params["mask"] = naimask_to_base64(resize_to_naimask(mask, (width, height), "nai-diffusion-4" in model or "nai-diffusion-5" in model))
+                        params["mask"] = naimask_to_base64(
+                            resize_to_naimask(
+                                mask,
+                                (width, height),
+                                "nai-diffusion-4" in model or "nai-diffusion-5" in model,
+                                )
+                        )
                     params["add_original_image"] = add_original_image
 
                 if "vibe" in option:
@@ -572,9 +615,6 @@ class GenerateNAID:
                             params["reference_image_multiple"].append(image_to_base64(resize_image(vimg, (width, height))))
                             params["reference_information_extracted_multiple"].append(information_extracted)
                             params["reference_strength_multiple"].append(strength)
-
-                if "model" in option:
-                    model = option["model"]
 
                 # NOTE
                 # Updating dictionaries in Python will clobber/overwrite existing values
@@ -602,39 +642,52 @@ class GenerateNAID:
                 params["v4_negative_prompt"]["use_coords"] = use_coords
                 params["v4_negative_prompt"]["use_order"] = use_order
 
-                if "character_reference_single" in option:
-                    with _naid_profile_step(profile_enabled, "character reference pad + base64"):
-                        ref = option["character_reference_single"]
-                        base_caption = "character&style" if ref["style_aware"] else "character"
-                        ref_img = ref["image"]
-                        _, h_raw, w_raw, _ = ref_img.shape
-                        canvas_w, canvas_h = _choose_cr_canvas(w_raw, h_raw)
-                        padded = pad_image_to_canvas(ref_img, (canvas_w, canvas_h))
-                        params["director_reference_images"] = [image_to_base64(padded)]
-                        params["director_reference_descriptions"] = [{"use_coords": False, "use_order": False, "legacy_uc": False, "caption": {"base_caption": base_caption, "char_captions": []}}]
-                        params["director_reference_strength_values"] = [1.0]
-                        params["director_reference_secondary_strength_values"] = [1.0 - ref["fidelity"]]
-                        params["director_reference_information_extracted"] = [1.0]
+            if "character_reference_single" in option:
+                with _naid_profile_step(profile_enabled, "character reference pad + base64"):
+                    ref = option["character_reference_single"]
+                    base_caption = "character&style" if ref["style_aware"] else "character"
+                    ref_img = ref["image"]
+                    _, h_raw, w_raw, _ = ref_img.shape
+                    canvas_w, canvas_h = _choose_cr_canvas(w_raw, h_raw)
+                    padded = pad_image_to_canvas(ref_img, (canvas_w, canvas_h))
+                    params["director_reference_images"] = [image_to_base64(padded)]
+                    params["director_reference_descriptions"] = [{
+                        "use_coords": False,
+                        "use_order": False,
+                        "legacy_uc": False,
+                        "caption": {"base_caption": base_caption, "char_captions": []},
+                    }]
+                    params["director_reference_strength_values"] = [1.0]
+                    params["director_reference_secondary_strength_values"] = [1.0 - ref["fidelity"]]
+                    params["director_reference_information_extracted"] = [1.0]
 
-        with _naid_profile_step(profile_enabled, "final param adjustments"):
-            timeout = option.get("timeout", 120) if option else 120
-            retry = option.get("retry", 3) if option else 3
-            track_anlas = option.get("track_anlas", False) if option else False
-            image_format = option.get("image_format", "png") if option else "png"
-            params["image_format"] = image_format
+            with _naid_profile_step(profile_enabled, "final param adjustments"):
+                timeout = option.get("timeout", 120) if option else 120
+                retry = option.get("retry", 3) if option else 3
+                track_anlas = option.get("track_anlas", False) if option else False
+                image_format = option.get("image_format", "png") if option else "png"
+                params["image_format"] = image_format
 
-            if limit_opus_free:
-                pixel_limit = 1024 * 1024
-                if width * height > pixel_limit:
-                    params["width"], params["height"] = calculate_resolution(pixel_limit, (width, height))
-                if steps > 28: params["steps"] = 28
+                if limit_opus_free:
+                    pixel_limit = 1024 * 1024
+                    if width * height > pixel_limit:
+                        params["width"], params["height"] = calculate_resolution(pixel_limit, (width, height))
+                    if steps > 28:
+                        params["steps"] = 28
 
-            if variety: params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(params["width"], params["height"], model)
-            if sampler == "ddim" and "nai-diffusion-2" not in model: params["sampler"] = "ddim_v3"
-            if action == "infill" and "nai-diffusion-2" not in model: model = f"{model}-inpainting"
+                if variety:
+                    params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(
+                        params["width"],
+                        params["height"],
+                        model,
+                    )
+                if sampler == "ddim" and "nai-diffusion-2" not in model:
+                    params["sampler"] = "ddim_v3"
+                if action == "infill" and "nai-diffusion-2" not in model:
+                    model = f"{model}-inpainting"
 
-        start_anlas = None
-        if track_anlas:
+            start_anlas = None
+            if track_anlas:
                 try:
                     user_data = _get_user_data(self.access_token, timeout, retry)
                     training_steps_left = user_data.get("subscription", {}).get("trainingStepsLeft")
@@ -890,75 +943,23 @@ class V4NegativePrompt:
     RETURN_TYPES = ("STRING",)
     FUNCTION = "convert"
     CATEGORY = "NovelAI/v4"
+
     def convert(self, negative_caption):
         return (negative_caption,)
 
 
-# GenerateNAID node extension: character prompt slots added
-# Add 'characters' to INPUT_TYPES of existing GenerateNAID and internally assemble char_captions in a metadata.yaml structure.
-# Replace existing GenerateNAID.INPUT_TYPES
-
+# Compatibility input for CharacterNAI -> CharacterConcatenateNAI.
 old_generate_naid_input_types = GenerateNAID.INPUT_TYPES
 
 def new_generate_naid_input_types(s):
     types = old_generate_naid_input_types()
-    types["required"]["characters"] = ("CHARACTER_LIST_NAI", {"default": [], "forceInput": False, "multiline": True})
+    types["required"]["characters"] = (
+        "CHARACTER_LIST_NAI",
+        {"default": [], "forceInput": False},
+    )
     return types
-GenerateNAID.INPUT_TYPES = classmethod(new_generate_naid_input_types)
 
-# Add 'characters' to INPUT_TYPES of existing GenerateNAID and internally assemble char_captions in a metadata.yaml structure.
-
-old_generate_naid_generate = GenerateNAID.generate
-
-def new_generate_naid_generate(self, *args, **kwargs):
-    # characters is always the last argument
-    import inspect
-    sig = inspect.signature(old_generate_naid_generate)
-    params = list(sig.parameters.keys())
-    # Existing arguments + characters + option
-    option = kwargs.get('option', None)
-    characters = kwargs.get('characters', None)
-    if characters is None and len(args) >= len(params):
-        characters = args[len(params)-1]
-    # Build v4_prompt
-    if option is None:
-        option = {}
-    if characters:
-        # Same structure as metadata.yaml
-        char_captions = []
-        for idx, c in enumerate(characters):
-            centers = c.get("centers", [])
-            # Warn if centers is empty or None
-            if not centers or centers is None or not isinstance(centers, list) or not centers:
-                print(f"[WARN] Character index {idx} centers is empty or invalid: {centers}")
-            else:
-                # If centers is not in [{"x":..., "y":...}] format, fix it
-                if isinstance(centers, dict):
-                    centers = [centers]
-                elif isinstance(centers, list):
-                    # If it's a list but not a list of dicts, fix it
-                    if centers and not isinstance(centers[0], dict):
-                        print(f"[WARN] Unexpected format for centers: {centers}")
-                        centers = [{"x": centers[0], "y": centers[1]}] if len(centers) == 2 else []
-            char_captions.append({
-                "char_caption": c.get("char_caption", ""),
-                "centers": centers
-            })
-        if char_captions:
-            if "v4_prompt" not in option:
-                option["v4_prompt"] = {"caption": {}}
-            if "caption" not in option["v4_prompt"]:
-                option["v4_prompt"]["caption"] = {}
-            option["v4_prompt"]["caption"]["char_captions"] = char_captions
-    # Print option contents before sending to API
-    print("[DEBUG] API送信前 option:", option)
-    kwargs['option'] = option
-    # Remove characters from kwargs
-    if 'characters' in kwargs:
-        del kwargs['characters']
-    return old_generate_naid_generate(self, *args[:len(params)-1], **kwargs)
-
-GenerateNAID.generate = new_generate_naid_generate
+GenerateNAID.INPUT_TYPES = classmethod(new_generate_naid_input_types)   
 
 # -------------------------------------------------
 # Registration
