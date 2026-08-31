@@ -455,6 +455,10 @@ class GenerateNAID:
                 "keep_alpha": ("BOOLEAN", {"default": True, "tooltip": "Disable to further process output images locally"}),
             },
             "optional": {"option": ("NAID_OPTION",)},
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
         }
 
     RETURN_TYPES = ("IMAGE","METADATA",)
@@ -518,7 +522,7 @@ class GenerateNAID:
     def generate(self, limit_opus_free, width, height, positive, negative,
                  steps, cfg, decrisper, variety, smea, sampler, scheduler,
                  seed, uncond_scale, cfg_rescale, keep_alpha, use_coords, use_order, legacy_uc,
-                 characters=None, option=None):
+                 characters=None, option=None, prompt=None, extra_pnginfo=None):
         profile_enabled = True if option is None else option.get("profile", True)
         total_start = time.perf_counter()
 
@@ -759,7 +763,14 @@ class GenerateNAID:
                 d.mkdir(exist_ok=True, parents=True)
 
             with _naid_profile_step(profile_enabled, f"save image with metadata ({image_format}, quality={webp_quality})"):
-                save_image_with_metadata(image_bytes, d / file, image_format, webp_quality)
+                save_image_with_metadata(
+                    image_bytes,
+                    d / file,
+                    image_format,
+                    webp_quality,
+                    comfy_prompt=prompt,
+                    comfy_workflow=(extra_pnginfo or {}).get("workflow"),
+                    )
 
             if track_anlas and start_anlas is not None:
                 try:

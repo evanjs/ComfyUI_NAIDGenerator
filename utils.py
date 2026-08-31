@@ -535,7 +535,27 @@ def build_nai_xmp(comment):
 <?xpacket end="w"?>""".encode("utf-8")
 
 
-def save_image_with_metadata(image_bytes, output_path, output_format="png", webp_quality=85):
+def _build_comfy_webp_exif(image, comfy_prompt=None, comfy_workflow=None):
+    """Return EXIF bytes using ComfyUI's WebP metadata convention."""
+    exif = image.getexif()
+
+    if comfy_prompt is not None:
+        exif[271] = f"Prompt: {json.dumps(comfy_prompt, ensure_ascii=True)}"
+
+    if comfy_workflow is not None:
+        exif[270] = f"Workflow: {json.dumps(comfy_workflow, ensure_ascii=True)}"
+
+    return exif.tobytes()
+
+
+def save_image_with_metadata(
+        image_bytes,
+        output_path,
+        output_format="png",
+        webp_quality=85,
+        comfy_prompt=None,
+        comfy_workflow=None,
+):
     output_format = (output_format or "png").lower()
 
     if output_format == "png":
@@ -554,7 +574,13 @@ def save_image_with_metadata(image_bytes, output_path, output_format="png", webp
     if xmp:
         save_kwargs["xmp"] = xmp
 
-    if "exif" in image.info:
+    if comfy_prompt is not None or comfy_workflow is not None:
+        save_kwargs["exif"] = _build_comfy_webp_exif(
+            image,
+            comfy_prompt,
+            comfy_workflow,
+        )
+    elif "exif" in image.info:
         save_kwargs["exif"] = image.info["exif"]
 
     if "icc_profile" in image.info:
