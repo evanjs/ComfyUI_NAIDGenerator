@@ -11,6 +11,7 @@ import copy as _copy
 from .get_image_metadata import GetImageMetadata
 from .character_concatenate_nai import CharacterConcatenateNAI
 from .character_nai import CharacterNAI
+from .usage_limits import get_subscription, opus_usage_result, should_block_v5_generation
 
 from .utils import *
 import requests
@@ -128,8 +129,8 @@ def _metadata_to_json_string(metadata):
 ACCEPTED_CR_SIZES = [(1024, 1536), (1536, 1024), (1472, 1472)]
 
 def _get_user_data(access_token, timeout=120, retry=3):
-    """Fetches user data to check Anlas balance. Now a global helper."""
-    USER_API_BASE_URL = "https://api.novelai.net"
+    """Fetches subscription data for Anlas and Opus usage tracking."""
+    USER_API_BASE_URL = "https://image.novelai.net"
 
     req_mod = requests
     if retry is not None and retry > 1:
@@ -144,7 +145,7 @@ def _get_user_data(access_token, timeout=120, retry=3):
         req_mod = session
 
     response = req_mod.get(
-        f"{USER_API_BASE_URL}/user/data",
+        f"{USER_API_BASE_URL}/user/subscription",
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=timeout
     )
@@ -716,6 +717,23 @@ class GenerateNAID:
                     if steps > 28:
                         params["steps"] = 28
 
+                # V5 Opus generations beyond the rechargeable allowance spend Anlas.
+                # Check the live allowance before submitting when the safety limit is on.
+                if limit_opus_free and "nai-diffusion-5" in model.lower():
+                    try:
+                        usage_user_data = _get_user_data(self.access_token, timeout, retry)
+                    except Exception as e:
+                        raise RuntimeError(
+                            "Could not verify NovelAI V5 usage allowance; generation stopped "
+                            "to avoid unexpectedly spending Anlas."
+                        ) from e
+                    usage_subscription = get_subscription(usage_user_data)
+                    if should_block_v5_generation(usage_subscription, model):
+                        raise RuntimeError(
+                            "NovelAI V5 Opus free usage is exhausted (0% remaining). "
+                            "Generation stopped; disable limit_opus_free to continue with Anlas."
+                        )
+
                 if variety:
                     params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(
                         params["width"],
@@ -731,7 +749,7 @@ class GenerateNAID:
             if track_anlas:
                 try:
                     user_data = _get_user_data(self.access_token, timeout, retry)
-                    training_steps_left = user_data.get("subscription", {}).get("trainingStepsLeft")
+                    training_steps_left = get_subscription(user_data).get("trainingStepsLeft")
                     start_anlas = _training_steps_total(training_steps_left)
                     if start_anlas is not None: print(f"[NovelAI] Anlas (pre-gen): {start_anlas}")
                 except Exception as e: print(f"[NovelAI] Anlas tracking failed (pre-gen): {e}")
@@ -775,7 +793,7 @@ class GenerateNAID:
             if track_anlas and start_anlas is not None:
                 try:
                     user_data_final = _get_user_data(self.access_token, timeout, retry)
-                    training_steps_left_final = user_data_final.get("subscription", {}).get("trainingStepsLeft")
+                    training_steps_left_final = get_subscription(user_data_final).get("trainingStepsLeft")
                     final_anlas = _training_steps_total(training_steps_left_final)
                     if final_anlas is not None:
                         print(f"[NovelAI] Generation cost: {start_anlas - final_anlas} Anlas")
@@ -819,7 +837,7 @@ def base_augment(access_token, output_dir, limit_opus_free, ignore_errors, req_t
     start_anlas = None
     try:
         user_data = _get_user_data(access_token)
-        start_anlas = user_data.get("subscription", {}).get("trainingStepsLeft")
+        start_anlas = _training_steps_total(get_subscription(user_data).get("trainingStepsLeft"))
         if start_anlas is not None: print(f"[NovelAI] Anlas (pre-augment): {start_anlas}")
     except Exception as e: print(f"[NovelAI] Anlas tracking failed (pre-augment): {e}")
             
@@ -839,7 +857,7 @@ def base_augment(access_token, output_dir, limit_opus_free, ignore_errors, req_t
         if start_anlas is not None:
             try:
                 user_data_final = _get_user_data(access_token)
-                final_anlas = user_data_final.get("subscription", {}).get("trainingStepsLeft")
+                final_anlas = _training_steps_total(get_subscription(user_data_final).get("trainingStepsLeft"))
                 if final_anlas is not None:
                     print(f"[NovelAI] Augment cost: {start_anlas - final_anlas} Anlas")
                     print(f"[NovelAI] Anlas (post-augment): {final_anlas}")
@@ -957,7 +975,7 @@ class AnlasTrackerNAID:
         anlas_count = 0
         try:
             user_data = _get_user_data(self.access_token)
-            training_steps_left = user_data.get("subscription", {}).get("trainingStepsLeft", 0)
+            training_steps_left = get_subscription(user_data).get("trainingStepsLeft", 0)
             parsed_anlas_count = _training_steps_total(training_steps_left)
 
             if parsed_anlas_count is not None:
@@ -969,6 +987,40 @@ class AnlasTrackerNAID:
             return (0, "Error fetching Anlas")
         
         return (anlas_count, f"{anlas_count} Anlas")
+
+
+class OpusUsageTrackerNAID:
+    """Display the remaining Opus V5 usage allowance and estimated refill."""
+
+    def __init__(self):
+        self.access_token = get_access_token()
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {},
+            "optional": {"trigger": ("*",)},
+        }
+
+    RETURN_TYPES = ("INT", "STRING",)
+    RETURN_NAMES = ("usage_percent", "usage_info",)
+    FUNCTION = "get_usage"
+    CATEGORY = "NovelAI/utils"
+    OUTPUT_NODE = True
+
+    def get_usage(self, trigger=None):
+        # This is a synchronous remote API check; response/queue latency can be several seconds.
+        # Keep it user-triggered rather than polling, and avoid calling it in generation hot paths.
+        try:
+            user_data = _get_user_data(self.access_token)
+            result = opus_usage_result(user_data)
+            info = result["result"][1]
+            print(f"[NovelAI] Opus V5 usage: {info}")
+            return result
+        except Exception as e:
+            print(f"[NovelAI] Failed to fetch Opus V5 usage: {e}")
+            error_text = "Error fetching Opus V5 usage"
+            return {"ui": {"text": [error_text]}, "result": (0, error_text)}
 
 # -------------------------------------------------
 # V4 Base / Negative Prompt nodes
@@ -1024,6 +1076,7 @@ NODE_CLASS_MAPPINGS = {
     "CharacterReferenceOptionNAID": CharacterReferenceOption,
     "CharacterPromptOptionNAID": CharacterPromptOption,
     "AnlasTrackerNAID": AnlasTrackerNAID, # New node
+    "OpusUsageTrackerNAID": OpusUsageTrackerNAID,
     "MaskImageToNAID": ImageToNAIMask,
     "PromptToNAID": PromptToNAID,
     "RemoveBGNAID": RemoveBGAugment,
@@ -1048,6 +1101,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CharacterReferenceOptionNAID": "Character Reference ✒️🅝🅐🅘",
     "CharacterPromptOptionNAID": "Character Prompt ✒️🅝🅐🅘",
     "AnlasTrackerNAID": "Anlas Tracker ✒️🅝🅐🅘", # New node
+    "OpusUsageTrackerNAID": "Opus Usage Tracker ✒️🅝🅐🅘",
     "MaskImageToNAID": "Convert Mask Image ✒️🅝🅐🅘",
     "PromptToNAID": "Convert Prompt ✒️🅝🅐🅘",
     "RemoveBGNAID": "Remove BG ✒️🅝🅐🅘",

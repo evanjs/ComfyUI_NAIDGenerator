@@ -118,6 +118,22 @@ A new node, **`Anlas Tracker ✒️🅝🅐🅘`**, is available in the `NovelAI
 
 Connect its `anlas_string` output to a display node (e.g., "Show Text" from the [WAS Node Suite](https://github.com/WASasquatch/was-node-suite-comfyui)) to see the value. Use the `trigger` input to control when the balance is checked.
 
+### Opus V5 Usage Tracker
+
+The **`Opus Usage Tracker ✒️🅝🅐🅘`** node in `NovelAI/utils` has a **Check Usage** button.
+After checking, the button shows the remaining percentage; hover over it for the estimated image count and refill details.
+Its `usage_info` and `usage_percent` outputs are also available for workflow connections.
+Image counts are estimates based on the supplied NovelAI sample; actual allowance use varies with resolution and steps.
+
+The tracker is an output node so its button can queue it independently.
+If `usage_info` or `usage_percent` feeds another output node, the button queues that downstream output too so connected displays refresh.
+A normal **Queue Prompt** also executes all output nodes in the workflow, including this tracker if it is present.
+
+With **`limit_opus_free`** enabled, V5 generations check the live allowance before submission.
+An exhausted active Opus allowance (0%) blocks the request rather than spending Anlas.
+If the usage API cannot be reached, V5 generation is stopped for safety.
+Disable the limit to explicitly allow a request to proceed using Anlas.
+
 ![image](https://github.com/user-attachments/assets/387799cd-36bd-4b5d-9746-bfd74db09f74) <!-- Placeholder for actual image -->
 
 ### PromptToNAID
